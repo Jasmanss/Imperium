@@ -5,6 +5,7 @@ openai>=1.0.0
 playwright>=1.40.0
 pyautogui>=0.9.54
 python-dotenv>=1.0.0
+qrcode>=7.4
 python-multipart>=0.0.9
 uvicorn>=0.30.0
 websockets>=12.0

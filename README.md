@@ -36,7 +36,24 @@ No need to remember complex commands or navigate through menus. Just say what yo
 2. Install dependencies: `pip install -r backend/requirements.txt`
 3. Add your Anthropic API key to `backend/.env`
 4. Run the server: `python backend/main.py`
-5. Open `http://YOUR_MAC_IP:8000/app` on your phone
+5. **Pair your phone:** scan the QR code printed in the terminal (it opens
+   `http://YOUR_MAC_IP:8000/app` with a one-time pairing link)
+
+For access away from home Wi-Fi, run the server behind
+[Tailscale](https://tailscale.com) and pair using the Tailscale IP — never
+port-forward the server to the public internet.
+
+## Security
+
+An agent that executes real actions on your Mac is a remote-execution
+surface, so v2 treats security as the core feature:
+
+- **Pairing-token auth** on every action endpoint (QR-code pairing, deny-by-default middleware)
+- **Tiered permissions** — destructive actions (send email/text, git push, quit everything) require a Confirm tap on your phone before anything runs
+- **Script policy gate** — LLM-generated AppleScript is never executed raw: shell escapes, credential access, file deletion, and non-allowlisted apps are blocked
+- **Append-only audit log** of every command, decision, and result (`~/.imperium/audit.db`)
+
+The full threat model is in [SECURITY.md](SECURITY.md).
 
 ## Team
 

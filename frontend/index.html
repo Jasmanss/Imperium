@@ -350,6 +350,26 @@
 
     <script>
         const SERVER_URL = window.location.origin;
+
+        // --- Pairing token ---------------------------------------------
+        // The QR code encodes /app#token=...; the fragment never reaches
+        // the server. Store it once, then send it as a Bearer header.
+        (function initPairingToken() {
+            try {
+                if (location.hash && location.hash.startsWith("#token=")) {
+                    localStorage.setItem("imperium_token", location.hash.slice(7));
+                    history.replaceState(null, "", location.pathname);
+                }
+            } catch (e) { /* private mode etc. — requests will 401 visibly */ }
+        })();
+
+        function authHeaders() {
+            let token = null;
+            try { token = localStorage.getItem("imperium_token"); } catch (e) {}
+            return token ? { "Authorization": `Bearer ${token}` } : {};
+        }
+
+        const NOT_PAIRED_MSG = "Not paired — scan the QR code in the Mac terminal to pair this phone.";
         
         const feedEl = document.getElementById("feed");
         const emptyStateEl = document.getElementById("emptyState");
@@ -582,6 +602,76 @@
             return wrapper;
         }
 
+        function handleCommandResponse(data, command, userWrapper) {
+            if (data.requires_confirmation) {
+                addConfirmPrompt(data, command, userWrapper);
+            } else if (data.error) {
+                addResponse(data.error, "error", userWrapper);
+            } else if (data.osascript_ok === false) {
+                let errMsg = data.action || "Command failed";
+                if (data.osascript_error) {
+                    errMsg += `\n${data.osascript_error}`;
+                }
+                addResponse(errMsg, "error", userWrapper);
+            } else if (data.action) {
+                addResponse(`✓ ${data.action}`, "success", userWrapper);
+
+                // Update navigation based on action
+                const { app, page } = parseNavigationFromAction(data.action, command);
+                const isTyping = data.visual_typing === true;
+                if (app || page) {
+                    updateNavigation(app, page, isTyping);
+                }
+            } else {
+                addResponse("✓ Command executed", "success", userWrapper);
+            }
+        }
+
+        function addConfirmPrompt(data, command, userWrapper) {
+            const wrapper = addResponse(`⚠ ${data.action}`, "processing", userWrapper);
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+
+            const confirmBtn = document.createElement("button");
+            confirmBtn.textContent = "Confirm";
+            confirmBtn.style.cssText = "flex:1;padding:10px;border:none;border-radius:8px;background:#e5484d;color:#fff;font-weight:600;";
+
+            const cancelBtn = document.createElement("button");
+            cancelBtn.textContent = "Cancel";
+            cancelBtn.style.cssText = "flex:1;padding:10px;border:none;border-radius:8px;background:rgba(255,255,255,0.12);color:inherit;";
+
+            cancelBtn.onclick = () => {
+                wrapper.remove();
+                addResponse("Cancelled — nothing was executed.", "error", userWrapper);
+            };
+
+            confirmBtn.onclick = async () => {
+                confirmBtn.disabled = true;
+                cancelBtn.disabled = true;
+                confirmBtn.textContent = "Running...";
+                try {
+                    const res = await fetch(`${SERVER_URL}/confirm/${data.pending_id}`, {
+                        method: "POST",
+                        headers: authHeaders()
+                    });
+                    wrapper.remove();
+                    if (res.status === 401) {
+                        addResponse(NOT_PAIRED_MSG, "error", userWrapper);
+                    } else {
+                        handleCommandResponse(await res.json(), command, userWrapper);
+                    }
+                } catch (err) {
+                    wrapper.remove();
+                    addResponse(`Error: ${err.message || "Request failed"}`, "error", userWrapper);
+                }
+            };
+
+            row.appendChild(cancelBtn);
+            row.appendChild(confirmBtn);
+            wrapper.firstChild.appendChild(row);
+            feedEl.scrollTop = feedEl.scrollHeight;
+        }
+
         function startEdit(wrapper) {
             if (isProcessing) return;
             
@@ -651,34 +741,18 @@
                 const res = await fetch(`${SERVER_URL}/text-command`, {
                     method: "POST",
                     headers: {
-                        "Content-Type": "application/json"
+                        "Content-Type": "application/json",
+                        ...authHeaders()
                     },
                     body: JSON.stringify({ command })
                 });
 
-                const data = await res.json();
-                
                 processingWrapper.remove();
 
-                if (data.error) {
-                    addResponse(data.error, "error", userWrapper);
-                } else if (data.osascript_ok === false) {
-                    let errMsg = data.action || "Command failed";
-                    if (data.osascript_error) {
-                        errMsg += `\n${data.osascript_error}`;
-                    }
-                    addResponse(errMsg, "error", userWrapper);
-                } else if (data.action) {
-                    addResponse(`✓ ${data.action}`, "success", userWrapper);
-                    
-                    // Update navigation based on action
-                    const { app, page } = parseNavigationFromAction(data.action, command);
-                    const isTyping = data.visual_typing === true;
-                    if (app || page) {
-                        updateNavigation(app, page, isTyping);
-                    }
+                if (res.status === 401) {
+                    addResponse(NOT_PAIRED_MSG, "error", userWrapper);
                 } else {
-                    addResponse("✓ Command executed", "success", userWrapper);
+                    handleCommandResponse(await res.json(), command, userWrapper);
                 }
 
             } catch (err) {

@@ -15,9 +15,13 @@ import pyautogui
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
+import audit
+import permissions
+import policy_gate
+import security
 
 # Configure pyautogui for smoother typing
 pyautogui.PAUSE = 0.0  # No pause between pyautogui calls
@@ -269,13 +273,9 @@ if not check_accessibility_permission():
     )
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The frontend is served same-origin at /app, so no CORS is needed.
+# Every non-public route requires the Bearer pairing token (see security.py).
+app.middleware("http")(security.auth_middleware)
 
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -786,10 +786,21 @@ def transcript_mentions_chrome(transcript: str) -> bool:
 
 
 def _osascript_pipe(script: str) -> dict:
-    """Run AppleScript via stdin (no validation)."""
+    """Run AppleScript via stdin (policy-gated; no correctness validation)."""
     script = script.strip()
     if not script:
         return {"stdout": "", "stderr": "empty script", "returncode": 1}
+    allowed, reason = policy_gate.check_script(script)
+    if not allowed:
+        print(f"POLICY BLOCKED: {reason}")
+        audit.log_event(
+            decision="script_blocked", script=script, error=reason, ok=False
+        )
+        return {
+            "stdout": "",
+            "stderr": f"Blocked by policy: {reason}",
+            "returncode": 1,
+        }
     try:
         result = subprocess.run(
             ["osascript", "-"],
@@ -1150,9 +1161,8 @@ def _parse_git_command(command: str) -> dict:
     return result
 
 
-@app.post("/git-command")
 async def git_command(data: dict):
-    """Execute git commands remotely."""
+    """Execute git commands (internal — reached via the gated /text-command)."""
     command = data.get("command", "")
     if not command.strip():
         return {"error": "No command provided"}
@@ -1339,7 +1349,6 @@ async def git_command(data: dict):
     return {"transcript": command, "error": "Unknown git action"}
 
 
-@app.post("/create-project")
 async def create_project(data: dict):
     """Create a complete web project from a description."""
     command = data.get("command", "")
@@ -1443,7 +1452,6 @@ def _parse_spotify_command(command: str) -> dict:
     return result
 
 
-@app.post("/spotify-control")
 async def spotify_control(data: dict):
     """Control Spotify with search and playback."""
     command = data.get("command", "")
@@ -1680,7 +1688,6 @@ def _lookup_contact_phone(name: str) -> str | None:
     return None
 
 
-@app.post("/compose-email")
 async def compose_email(data: dict):
     """
     Compose and send an email with optional visual typing.
@@ -1819,7 +1826,6 @@ async def compose_email(data: dict):
             return {"transcript": command, "error": str(e)}
 
 
-@app.post("/send-message")
 async def send_message(data: dict):
     """Send an iMessage to a contact by name or phone number."""
     command = data.get("command", "")
@@ -1894,19 +1900,113 @@ async def send_message(data: dict):
         return {"transcript": command, "error": str(e)}
 
 
+END_ALL_PHRASES = [
+    "end all sessions",
+    "close everything",
+    "close all apps",
+    "quit everything",
+    "quit all apps",
+    "close all windows",
+]
+
+
+def _classify_command(command: str) -> str:
+    """Map a command to a permission category (see permissions.py tiers)."""
+    cl = command.lower()
+    if any(phrase in cl for phrase in END_ALL_PHRASES):
+        return "close_all_apps"
+    if _wants_git_command(command):
+        return "git_push" if "push" in cl else "git"
+    if _wants_email_compose(command):
+        return "email_send"
+    if _wants_spotify_control(command):
+        return "spotify"
+    if _wants_text_message(command):
+        return "message_send"
+    if _wants_project_creation(command):
+        return "create_project"
+    return "applescript_general"
+
+
 @app.post("/text-command")
 async def text_command(data: dict):
     command = data.get("command", "")
     if not command.strip():
         return {"error": "No command provided"}
-    
+
+    category = _classify_command(command)
+    tier = permissions.tier_for(category)
+
+    if permissions.needs_confirmation(tier):
+        pending_id = permissions.create_pending(command, category)
+        audit.log_event(
+            decision="pending_confirmation",
+            command=command,
+            category=category,
+            tier=tier,
+        )
+        return {
+            "transcript": command,
+            "requires_confirmation": True,
+            "pending_id": pending_id,
+            "category": category,
+            "action": f"This is a {tier} action ({category.replace('_', ' ')}) — confirm to execute.",
+        }
+
+    return await _execute_command(data, command, category, tier)
+
+
+@app.post("/confirm/{pending_id}")
+async def confirm_pending(pending_id: str):
+    """Execute a parked destructive command after the user taps Confirm."""
+    entry = permissions.pop_pending(pending_id)
+    if entry is None:
+        return {"error": "Confirmation expired or already used — send the command again."}
+    audit.log_event(
+        decision="confirmed",
+        command=entry["command"],
+        category=entry["category"],
+        tier=permissions.tier_for(entry["category"]),
+    )
+    return await _execute_command(
+        {"command": entry["command"]},
+        entry["command"],
+        entry["category"],
+        permissions.tier_for(entry["category"]),
+    )
+
+
+@app.get("/audit")
+async def audit_log(limit: int = 50):
+    """Recent audit entries (auth required, like every action route)."""
+    return {"entries": audit.recent(min(max(limit, 1), 200))}
+
+
+async def _execute_command(data: dict, command: str, category: str, tier: str) -> dict:
+    """Run a command that has passed the permission gate, with audit logging."""
+    started = time.time()
+    result = await _run_text_command(data, command)
+    ok = not result.get("error") and result.get("osascript_ok", True) is not False
+    audit.log_event(
+        decision="executed" if ok else "failed",
+        command=command,
+        category=category,
+        tier=tier,
+        error=str(result.get("error") or result.get("osascript_error") or "")[:500],
+        ok=ok,
+        duration_ms=int((time.time() - started) * 1000),
+    )
+    return result
+
+
+async def _run_text_command(data: dict, command: str) -> dict:
     print(f"\n{'='*60}")
     print(f"COMMAND: {command}")
     print(f"{'='*60}")
-    
+
     # Handle "end all sessions" / "close everything" commands
     cl = command.lower()
-    if any(phrase in cl for phrase in ["end all sessions", "close everything", "close all apps", "quit everything", "quit all apps", "close all windows"]):
+    if any(phrase in cl for phrase in END_ALL_PHRASES):
         print("ROUTING TO: end-all-sessions")
         script = '''
         tell application "System Events"
@@ -1998,4 +2098,5 @@ if __name__ == "__main__":
     }
     if _reload:
         _run_kw["reload_dirs"] = [str(BASE_DIR)]
+    security.print_pairing_info(_port)
     uvicorn.run("main:app", **_run_kw)
