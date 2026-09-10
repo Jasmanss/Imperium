@@ -15,9 +15,11 @@ user taps Confirm on the phone. Overrides live in ~/.imperium/permissions.json
 
 from __future__ import annotations
 
+import contextvars
 import json
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".imperium" / "permissions.json"
@@ -94,6 +96,25 @@ def needs_confirmation(tier: str) -> bool:
 
 def app_allowlist() -> list[str]:
     return load_config()["app_allowlist"]
+
+
+_confirmed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "imperium_confirmed", default=False
+)
+
+
+@contextmanager
+def confirmed_context():
+    """Mark the command running in this context as confirmed on the phone."""
+    token = _confirmed.set(True)
+    try:
+        yield
+    finally:
+        _confirmed.reset(token)
+
+
+def is_confirmed() -> bool:
+    return _confirmed.get()
 
 
 def create_pending(command: str, category: str) -> str:

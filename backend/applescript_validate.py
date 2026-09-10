@@ -9,6 +9,7 @@ import re
 import anthropic
 from dotenv import load_dotenv
 
+import tracing
 from chrome_helpers import build_chrome_new_tab_script
 
 load_dotenv()
@@ -84,8 +85,14 @@ def _parse_json_fix(text: str) -> dict:
 _SAFE_CHROME_TAB_EXAMPLE = build_chrome_new_tab_script("ACTUAL_URL_HERE")
 
 
-def fix_applescript_with_claude(script: str, validation_error: str) -> tuple[str, str]:
-    """One retry: ask Haiku to replace URL variables with literals. Returns (script, action)."""
+def fix_applescript_with_claude(
+    script: str, validation_error: str, runtime_error: str = ""
+) -> tuple[str, str]:
+    """Ask Haiku to repair a script. Returns (script, action).
+
+    Handles both static validation failures and runtime osascript errors; the
+    caller bounds how many times this runs (see run_applescript in main.py).
+    """
     script_model = os.getenv("ANTHROPIC_SCRIPT_MODEL", "claude-haiku-4-5").strip()
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     open_loc_hint = ""
@@ -108,14 +115,21 @@ tell application "Google Chrome"
     end if
 end tell
 """
+    runtime_block = (
+        f"\nWhen run, osascript reported this runtime error:\n{runtime_error}\n"
+        "Fix the cause of that runtime error as well.\n"
+        if runtime_error
+        else ""
+    )
     msg = client.messages.create(
         model=script_model,
         max_tokens=2000,
         messages=[
             {
                 "role": "user",
-                "content": f"""This AppleScript has an error: {validation_error}
+                "content": f"""This AppleScript has an error: {validation_error or runtime_error}
 Original script: {script}
+{runtime_block}
 Fix it by replacing ALL variable references with hardcoded string values.
 Every URL must be a quoted string literal like 'https://example.com'
 Never use variable names like URL, theURL, urlString, website, address.
@@ -127,6 +141,7 @@ Return ONLY fixed JSON: {{ "script": "FIXED_SCRIPT", "action": "ACTION" }}""",
             }
         ],
     )
+    tracing.record_usage(msg, script_model)
     raw = msg.content[0].text
     data = _parse_json_fix(raw)
     return data["script"], data.get("action") or "Fixed AppleScript (URL literals)."

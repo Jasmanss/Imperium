@@ -22,6 +22,7 @@ import audit
 import permissions
 import policy_gate
 import security
+import tracing
 
 # Configure pyautogui for smoother typing
 pyautogui.PAUSE = 0.0  # No pause between pyautogui calls
@@ -728,6 +729,7 @@ Return ONLY this JSON — no markdown, no explanation:
             }
         ],
     )
+    tracing.record_usage(message, script_model)
     raw = message.content[0].text
     print(f"CLAUDE RAW RESPONSE:\n{raw[:1000]}{'...' if len(raw) > 1000 else ''}")
     try:
@@ -907,38 +909,69 @@ async def attempt_chrome_open_cli(
     }
 
 
+MAX_REPAIR_ATTEMPTS = int(os.getenv("IMPERIUM_MAX_REPAIRS", "2"))
+
+
 def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
-    """Validate (one Claude fix retry), then run AppleScript via stdin."""
+    """Validate, execute, and repair on failure — bounded to MAX_REPAIR_ATTEMPTS.
+
+    One loop handles both failure kinds: a static validation error (repair before
+    running) and a runtime osascript error (repair and re-run). Every candidate
+    script — original or repaired — still passes through the policy gate inside
+    `_osascript_pipe`, so a repair can never widen what is allowed to execute.
+    A policy block is terminal: repairing it would be the model talking its way
+    past the security layer.
+    """
     script = script.strip()
     if not script:
         return {"stdout": "", "stderr": "empty script", "returncode": 1}, original_action
 
-    ok, err = validate_applescript(script)
-    if not ok:
+    action = original_action
+    last_error = ""
+
+    for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
+        valid, validation_error = validate_applescript(script)
+
+        if valid:
+            result = _osascript_pipe(script)
+            if result["returncode"] == 0:
+                if attempt > 0:
+                    tracing.mark_repaired()
+                return result, action
+            if result.get("stderr", "").startswith("Blocked by policy:"):
+                return result, action
+            last_error = result.get("stderr", "") or "osascript failed"
+            runtime_error, static_error = last_error, ""
+        else:
+            last_error = validation_error
+            runtime_error, static_error = "", validation_error
+
+        if attempt == MAX_REPAIR_ATTEMPTS:
+            break
+
+        tracing.record_repair()
         try:
-            script, fixed_action = fix_applescript_with_claude(script, err)
+            script, action = fix_applescript_with_claude(
+                script, static_error, runtime_error=runtime_error
+            )
         except Exception as e:
             return (
                 {
                     "stdout": "",
-                    "stderr": f"AppleScript validation: {err}. Fix failed: {e}",
+                    "stderr": f"AppleScript error: {last_error}. Repair failed: {e}",
                     "returncode": 1,
                 },
                 original_action,
             )
-        ok2, err2 = validate_applescript(script)
-        if not ok2:
-            return (
-                {
-                    "stdout": "",
-                    "stderr": f"AppleScript invalid after fix: {err2}",
-                    "returncode": 1,
-                },
-                original_action,
-            )
-        return _osascript_pipe(script), fixed_action
 
-    return _osascript_pipe(script), original_action
+    return (
+        {
+            "stdout": "",
+            "stderr": f"AppleScript failed after {MAX_REPAIR_ATTEMPTS} repair attempts: {last_error}",
+            "returncode": 1,
+        },
+        original_action,
+    )
 
 
 def _wants_project_creation(command: str) -> bool:
@@ -990,6 +1023,7 @@ CRITICAL:
         ],
     )
     
+    tracing.record_usage(message, project_model)
     raw = message.content[0].text
     print(f"PROJECT GENERATION RESPONSE LENGTH: {len(raw)}")
     
@@ -1059,6 +1093,14 @@ CRITICAL:
 def _wants_git_command(command: str) -> bool:
     """Detect if user wants to run a git command."""
     cl = command.lower()
+
+    # Texts and emails often say "with message" or "status of"; they only count
+    # as git when they also name a git action.
+    message_indicators = ["text ", "send a text", "send text", "sms ", "imessage ", "message ", "email"]
+    if any(t in cl for t in message_indicators) and not re.search(
+        r"\b(?:git|commit|push|pull|github)\b", cl
+    ):
+        return False
     
     # Explicit git commands - check these FIRST
     git_phrases = [
@@ -1968,12 +2010,13 @@ async def confirm_pending(pending_id: str):
         category=entry["category"],
         tier=permissions.tier_for(entry["category"]),
     )
-    return await _execute_command(
-        {"command": entry["command"]},
-        entry["command"],
-        entry["category"],
-        permissions.tier_for(entry["category"]),
-    )
+    with permissions.confirmed_context():
+        return await _execute_command(
+            {"command": entry["command"]},
+            entry["command"],
+            entry["category"],
+            permissions.tier_for(entry["category"]),
+        )
 
 
 @app.get("/audit")
@@ -1982,10 +2025,17 @@ async def audit_log(limit: int = 50):
     return {"entries": audit.recent(min(max(limit, 1), 200))}
 
 
+@app.get("/stats")
+async def execution_stats():
+    """Success rate, latency percentiles, token usage, and repair impact."""
+    return audit.stats()
+
+
 async def _execute_command(data: dict, command: str, category: str, tier: str) -> dict:
-    """Run a command that has passed the permission gate, with audit logging."""
+    """Run a command that has passed the permission gate, with tracing and audit logging."""
     started = time.time()
-    result = await _run_text_command(data, command)
+    with tracing.span() as span:
+        result = await _run_text_command(data, command)
     ok = not result.get("error") and result.get("osascript_ok", True) is not False
     audit.log_event(
         decision="executed" if ok else "failed",
@@ -1995,6 +2045,7 @@ async def _execute_command(data: dict, command: str, category: str, tier: str) -
         error=str(result.get("error") or result.get("osascript_error") or "")[:500],
         ok=ok,
         duration_ms=int((time.time() - started) * 1000),
+        trace=span,
     )
     return result
 

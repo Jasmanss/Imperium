@@ -14,6 +14,8 @@ from pathlib import Path
 import anthropic
 from dotenv import load_dotenv
 
+import tracing
+
 load_dotenv()
 
 _claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -136,6 +138,7 @@ User command:
             }
         ],
     )
+    tracing.record_usage(message, script_model)
     raw = message.content[0].text
     data = _parse_json_from_text(raw)
     html = data.get("html_document") or data.get("html")
@@ -296,6 +299,7 @@ User command:
             }
         ],
     )
+    tracing.record_usage(message, script_model)
     raw = message.content[0].text
     data = _parse_json_from_text(raw)
     code = data.get("python_code") or data.get("code")
