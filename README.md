@@ -55,6 +55,22 @@ surface, so v2 treats security as the core feature:
 
 The full threat model is in [SECURITY.md](SECURITY.md).
 
+## Evals
+
+`evals/` holds the eval harness: [`tasks.yaml`](evals/tasks.yaml) defines the tasks, [`runner.py`](evals/runner.py) runs them, and [`RESULTS.md`](evals/RESULTS.md) is regenerated on every run.
+
+- **Offline suite** — deterministic checks of auth, the permission gate and confirm flow, the script policy gate, the AppleScript validator, the retry-with-repair loop, tracing, and the audit store. Needs no API key; process spawns, keystrokes, and model calls are intercepted, so it never touches the Mac.
+- **Mutation check** — deliberately breaks each safety property in turn and requires the offline suite to catch it.
+- **Live suite** — real commands on a real Mac, verified by querying macOS state with AppleScript. Anything that would send, push, delete, or quit is refused even if listed.
+
+```bash
+pip install -r evals/requirements.txt
+python3 evals/runner.py          # offline suite + mutation check
+python3 evals/runner.py --live   # also run the live tasks (needs ANTHROPIC_API_KEY)
+```
+
+Every command also records latency, token usage, and repair attempts in the audit log; `GET /stats` returns success rate, p50/p95 latency, token totals, and how many commands the repair loop saved.
+
 ## Team
 
 Originally built as a team hackathon project (March 2026) by:

@@ -1,0 +1,27 @@
+name: evals
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    # The offline suite needs no API key and never drives the GUI, but the
+    # backend imports macOS-only automation libraries, so run on macOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            evals/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r evals/requirements.txt
+
+      - name: Offline evals and mutation check
+        run: python evals/runner.py --no-write
