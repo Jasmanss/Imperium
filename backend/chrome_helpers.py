@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
+import tracing
+
 
 def escape_url_for_chrome_applescript(url: str) -> str:
     """Escape backslashes and double quotes for AppleScript string literals."""
@@ -49,6 +51,7 @@ end tell"""
 
 
 def _run_osascript(script: str) -> tuple[bool, str]:
+    tracing.record_script(script)
     result = subprocess.run(
         ["osascript", "-"],
         input=script.strip() + "\n",

@@ -1,4 +1,4 @@
-"""Per-command tracing — latency, model token usage, and repair attempts.
+"""Per-command tracing — model token usage, repair attempts, and the AppleScript each command ran.
 
 Anthropic calls happen deep inside the command path (script generation, repair,
 project generation), while the audit record is written at the top in
@@ -30,6 +30,7 @@ def _new_trace() -> dict:
         "models": [],
         "repair_attempts": 0,
         "repair_succeeded": False,
+        "scripts": [],
     }
 
 
@@ -75,6 +76,14 @@ def mark_repaired() -> None:
     if trace is None:
         return
     trace["repair_succeeded"] = True
+
+
+def record_script(script: str) -> None:
+    """Record an AppleScript the command executed, for the audit log."""
+    trace = _current.get()
+    if trace is None:
+        return
+    trace["scripts"].append(script.strip())
 
 
 def snapshot() -> dict:

@@ -207,6 +207,7 @@ except ImportError:
 async def _app_lifespan(_app: FastAPI):
     verify_chrome_helpers()
     check_chrome_cdp()
+    warn_if_no_accessibility_permission()
     yield
 
 
@@ -263,15 +264,20 @@ def check_accessibility_permission() -> bool:
     return result.returncode == 0
 
 
-if not check_accessibility_permission():
-    print(
-        "WARNING: Accessibility permission may be required for full automation "
-        "(Spotify play / System Events)."
-    )
-    print(
-        "Grant access: System Settings → Privacy & Security → Accessibility — "
-        "add Terminal or the app running Python."
-    )
+def warn_if_no_accessibility_permission() -> None:
+    try:
+        granted = check_accessibility_permission()
+    except (OSError, subprocess.TimeoutExpired):
+        granted = False
+    if not granted:
+        print(
+            "WARNING: Accessibility permission may be required for full automation "
+            "(Spotify play / System Events)."
+        )
+        print(
+            "Grant access: System Settings → Privacy & Security → Accessibility — "
+            "add Terminal or the app running Python."
+        )
 
 
 # The frontend is served same-origin at /app, so no CORS is needed.
@@ -787,22 +793,37 @@ def transcript_mentions_chrome(transcript: str) -> bool:
     return "chrome" in t or "google chrome" in t
 
 
+def _run_handler_script(script: str, timeout: float) -> subprocess.CompletedProcess:
+    """Run a built-in handler's AppleScript template and record it in the trace.
+
+    Handler templates do not pass through the policy gate, so every value
+    interpolated into one must be quoted with policy_gate.applescript_literal.
+    """
+    tracing.record_script(script)
+    return subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout
+    )
+
+
+def _policy_block(script: str) -> dict | None:
+    """The blocked result if the policy gate refuses the script, else None."""
+    allowed, reason = policy_gate.check_script(script)
+    if allowed:
+        return None
+    print(f"POLICY BLOCKED: {reason}")
+    audit.log_event(decision="script_blocked", script=script, error=reason, ok=False)
+    return {"stdout": "", "stderr": f"Blocked by policy: {reason}", "returncode": 1}
+
+
 def _osascript_pipe(script: str) -> dict:
     """Run AppleScript via stdin (policy-gated; no correctness validation)."""
     script = script.strip()
     if not script:
         return {"stdout": "", "stderr": "empty script", "returncode": 1}
-    allowed, reason = policy_gate.check_script(script)
-    if not allowed:
-        print(f"POLICY BLOCKED: {reason}")
-        audit.log_event(
-            decision="script_blocked", script=script, error=reason, ok=False
-        )
-        return {
-            "stdout": "",
-            "stderr": f"Blocked by policy: {reason}",
-            "returncode": 1,
-        }
+    blocked = _policy_block(script)
+    if blocked:
+        return blocked
+    tracing.record_script(script)
     try:
         result = subprocess.run(
             ["osascript", "-"],
@@ -912,15 +933,30 @@ async def attempt_chrome_open_cli(
 MAX_REPAIR_ATTEMPTS = int(os.getenv("IMPERIUM_MAX_REPAIRS", "2"))
 
 
+def _unsafe_to_rerun(error: str) -> bool:
+    """True when re-running a failed script could repeat effects it already had.
+
+    AppleScript reports compile failures as a syntax error (-2741) before any
+    line runs; any other failure may come after earlier lines executed.
+    """
+    if error.startswith("Blocked by policy:") or "timed out" in error:
+        return True
+    if "syntax error" in error or "(-2741)" in error:
+        return False
+    return permissions.is_confirmed()
+
+
 def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
-    """Validate, execute, and repair on failure — bounded to MAX_REPAIR_ATTEMPTS.
+    """Check, validate, execute, and repair on failure — bounded to MAX_REPAIR_ATTEMPTS.
 
     One loop handles both failure kinds: a static validation error (repair before
     running) and a runtime osascript error (repair and re-run). Every candidate
-    script — original or repaired — still passes through the policy gate inside
-    `_osascript_pipe`, so a repair can never widen what is allowed to execute.
-    A policy block is terminal: repairing it would be the model talking its way
-    past the security layer.
+    script — original or repaired — is policy-checked before it is validated, so
+    a script that is both invalid and disallowed is blocked rather than sent to
+    the model for repair. A policy block is terminal: repairing it would be the
+    model talking its way past the security layer. A runtime failure is not
+    re-run after a timeout or for a confirmed command, because earlier lines may
+    already have had outward effects such as sending a message.
     """
     script = script.strip()
     if not script:
@@ -930,6 +966,10 @@ def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
     last_error = ""
 
     for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
+        blocked = _policy_block(script)
+        if blocked:
+            return blocked, action
+
         valid, validation_error = validate_applescript(script)
 
         if valid:
@@ -938,9 +978,9 @@ def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
                 if attempt > 0:
                     tracing.mark_repaired()
                 return result, action
-            if result.get("stderr", "").startswith("Blocked by policy:"):
-                return result, action
             last_error = result.get("stderr", "") or "osascript failed"
+            if _unsafe_to_rerun(last_error):
+                return result, action
             runtime_error, static_error = last_error, ""
         else:
             last_error = validation_error
@@ -1513,17 +1553,17 @@ async def spotify_control(data: dict):
     
     if action == "pause":
         script = 'tell application "Spotify" to pause'
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        result = _run_handler_script(script, timeout=10)
         return {"transcript": command, "action": "Paused Spotify", "osascript_ok": result.returncode == 0}
     
     elif action == "next":
         script = 'tell application "Spotify" to next track'
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        result = _run_handler_script(script, timeout=10)
         return {"transcript": command, "action": "Skipped to next track", "osascript_ok": result.returncode == 0}
     
     elif action == "previous":
         script = 'tell application "Spotify" to previous track'
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        result = _run_handler_script(script, timeout=10)
         return {"transcript": command, "action": "Playing previous track", "osascript_ok": result.returncode == 0}
     
     elif action == "shuffle":
@@ -1537,7 +1577,7 @@ async def spotify_control(data: dict):
             end if
         end tell
         '''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        result = _run_handler_script(script, timeout=10)
         state = result.stdout.strip()
         return {"transcript": command, "action": f"Shuffle turned {state}", "osascript_ok": result.returncode == 0}
     
@@ -1556,12 +1596,12 @@ async def spotify_control(data: dict):
         delay 1
         tell application "Spotify" to play
         '''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15)
+        result = _run_handler_script(script, timeout=15)
         return {"transcript": command, "action": "Playing your Liked Songs", "osascript_ok": result.returncode == 0}
     
     elif action == "play" and query:
         # Search and play
-        escaped_query = query.replace('"', '\\"').replace("'", "'")
+        query_literal = policy_gate.applescript_literal(query)
         script = f'''
         tell application "Spotify"
             activate
@@ -1576,14 +1616,14 @@ async def spotify_control(data: dict):
                 keystroke "a" using {{command down}}
                 delay 0.2
                 -- Type search query
-                keystroke "{escaped_query}"
+                keystroke {query_literal}
                 delay 1.5
                 -- Press Enter to play top result
                 key code 36
             end tell
         end tell
         '''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
+        result = _run_handler_script(script, timeout=20)
         
         if result.returncode == 0:
             return {
@@ -1601,7 +1641,7 @@ async def spotify_control(data: dict):
     
     elif action == "playlist" and playlist:
         # Search for playlist
-        escaped_playlist = playlist.replace('"', '\\"').replace("'", "'")
+        playlist_literal = policy_gate.applescript_literal(f"{playlist} playlist")
         script = f'''
         tell application "Spotify"
             activate
@@ -1613,7 +1653,7 @@ async def spotify_control(data: dict):
                 delay 0.5
                 keystroke "a" using {{command down}}
                 delay 0.2
-                keystroke "{escaped_playlist} playlist"
+                keystroke {playlist_literal}
                 delay 1.5
                 -- Navigate down to first result
                 key code 125
@@ -1626,7 +1666,7 @@ async def spotify_control(data: dict):
             end tell
         end tell
         '''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=20)
+        result = _run_handler_script(script, timeout=20)
         return {
             "transcript": command,
             "action": f"Playing playlist '{playlist}'",
@@ -1636,7 +1676,7 @@ async def spotify_control(data: dict):
     else:
         # Just open Spotify
         script = 'tell application "Spotify" to activate'
-        subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        _run_handler_script(script, timeout=10)
         return {"transcript": command, "action": "Opened Spotify", "osascript_ok": True}
 
 
@@ -1696,7 +1736,7 @@ def _lookup_contact_phone(name: str) -> str | None:
     script = f'''
     tell application "Contacts"
         try
-            set matchingPeople to (every person whose name contains "{name}")
+            set matchingPeople to (every person whose name contains {policy_gate.applescript_literal(name)})
             if (count of matchingPeople) > 0 then
                 set thePerson to item 1 of matchingPeople
                 set thePhones to phones of thePerson
@@ -1709,12 +1749,7 @@ def _lookup_contact_phone(name: str) -> str | None:
     end tell
     '''
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        result = _run_handler_script(script, timeout=10)
         phone = result.stdout.strip()
         if phone:
             # Clean up phone number
@@ -1758,18 +1793,18 @@ async def compose_email(data: dict):
     
     if use_visual and body:
         # Two-step approach: AppleScript opens email without body, pyautogui types body
-        escaped_subject = subject.replace('"', '\\"')
-        escaped_recipient = (recipient or "").replace('"', '\\"')
+        subject_literal = policy_gate.applescript_literal(subject)
+        recipient_literal = policy_gate.applescript_literal(recipient or "")
         
         # Create email with empty body, leaving cursor in body field
         if has_attachment and attachment_file:
             script = f'''
             tell application "Mail"
                 activate
-                set theMessage to make new outgoing message with properties {{subject:"{escaped_subject}", content:"", visible:true}}
+                set theMessage to make new outgoing message with properties {{subject:{subject_literal}, content:"", visible:true}}
                 tell theMessage
-                    make new to recipient at end of to recipients with properties {{address:"{escaped_recipient}"}}
-                    make new attachment with properties {{file name:POSIX file "/Users/jasmansidhu/Desktop/{attachment_file}"}} at after the last paragraph
+                    make new to recipient at end of to recipients with properties {{address:{recipient_literal}}}
+                    make new attachment with properties {{file name:POSIX file {policy_gate.applescript_literal(str(Path.home() / "Desktop" / attachment_file))}}} at after the last paragraph
                 end tell
                 delay 0.5
             end tell
@@ -1787,9 +1822,9 @@ async def compose_email(data: dict):
             script = f'''
             tell application "Mail"
                 activate
-                set theMessage to make new outgoing message with properties {{subject:"{escaped_subject}", content:"", visible:true}}
+                set theMessage to make new outgoing message with properties {{subject:{subject_literal}, content:"", visible:true}}
                 tell theMessage
-                    make new to recipient at end of to recipients with properties {{address:"{escaped_recipient}"}}
+                    make new to recipient at end of to recipients with properties {{address:{recipient_literal}}}
                 end tell
                 delay 0.5
             end tell
@@ -1805,12 +1840,7 @@ async def compose_email(data: dict):
             '''
         
         # Execute setup script
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
+        result = _run_handler_script(script, timeout=15)
         
         if result.returncode != 0:
             print(f"Setup script failed: {result.stderr}")
@@ -1836,7 +1866,7 @@ async def compose_email(data: dict):
                 end tell
             end tell
             '''
-            subprocess.run(["osascript", "-e", send_script], capture_output=True, timeout=5)
+            _run_handler_script(send_script, timeout=5)
             action_msg = f"Composed and sent email to {recipient}"
         else:
             action_msg = f"Composed email to {recipient} (ready to send)"
@@ -1908,22 +1938,17 @@ async def send_message(data: dict):
             }
     
     # Send the message
-    escaped_message = message.replace('"', '\\"')
+    message_literal = policy_gate.applescript_literal(message)
     script = f'''
     tell application "Messages"
         set targetService to 1st account whose service type = iMessage
-        set targetBuddy to participant "{phone}" of targetService
-        send "{escaped_message}" to targetBuddy
+        set targetBuddy to participant {policy_gate.applescript_literal(phone)} of targetService
+        send {message_literal} to targetBuddy
     end tell
     '''
     
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
+        result = _run_handler_script(script, timeout=15)
         
         if result.returncode == 0:
             display_recipient = contact_name if contact_name else phone
@@ -2035,13 +2060,17 @@ async def _execute_command(data: dict, command: str, category: str, tier: str) -
     """Run a command that has passed the permission gate, with tracing and audit logging."""
     started = time.time()
     with tracing.span() as span:
-        result = await _run_text_command(data, command)
+        try:
+            result = await _run_text_command(data, command)
+        except Exception as e:
+            result = {"transcript": command, "error": f"Command failed: {type(e).__name__}: {e}"}
     ok = not result.get("error") and result.get("osascript_ok", True) is not False
     audit.log_event(
         decision="executed" if ok else "failed",
         command=command,
         category=category,
         tier=tier,
+        script="\n\n".join(span["scripts"]),
         error=str(result.get("error") or result.get("osascript_error") or "")[:500],
         ok=ok,
         duration_ms=int((time.time() - started) * 1000),
@@ -2069,7 +2098,7 @@ async def _run_text_command(data: dict, command: str) -> dict:
             end try
         end repeat
         '''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+        result = _run_handler_script(script, timeout=30)
         return {
             "transcript": command,
             "action": "Closed all open applications",

@@ -7,6 +7,7 @@ not silent.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -83,7 +84,7 @@ def log_event(
                     category,
                     tier,
                     decision,
-                    script[:2000],
+                    script[:8000],
                     error[:500],
                     None if ok is None else int(ok),
                     duration_ms,
@@ -150,7 +151,7 @@ def stats() -> dict:
             "repair_attempts": totals["repairs"] or 0,
             "commands_saved_by_repair": totals["repairs_ok"] or 0,
             "scripts_blocked_by_policy": blocked,
-            "awaiting_confirmation": pending,
+            "parked_for_confirmation": pending,
             "by_category": by_category,
         }
     except sqlite3.Error as e:
@@ -162,8 +163,8 @@ def _percentile(sorted_values: list[int], q: float) -> int | None:
     """Nearest-rank percentile over a pre-sorted list."""
     if not sorted_values:
         return None
-    idx = max(0, min(len(sorted_values) - 1, int(round(q * (len(sorted_values) - 1)))))
-    return sorted_values[idx]
+    rank = max(1, math.ceil(q * len(sorted_values)))
+    return sorted_values[rank - 1]
 
 
 def recent(limit: int = 50) -> list[dict]:
