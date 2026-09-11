@@ -7,10 +7,13 @@ Two suites, one task file (evals/tasks.yaml):
            command classification, the permission gate and confirm flow,
            the script policy gate, the AppleScript validator, auth, the
            retry-with-repair loop, tracing, and the audit schema migration.
-           Needs no API key and never touches the Mac: process spawns,
-           keystrokes, and model calls are intercepted, and any attempt
-           fails the task. Every task gets its own temporary token, config,
-           and audit database, so ~/.imperium is never read or written.
+           Needs no API key and never drives the Mac: process spawns,
+           keystrokes, and model calls are intercepted and fail the task,
+           and importing the backend is guarded the same way (only `uname`,
+           run by the standard library, is let through). Every task gets its
+           own temporary token, config, and audit database, so ~/.imperium
+           is never read or written. Built-in handlers are checked for
+           AppleScript injection by capturing the scripts they build.
 
   live     End-to-end commands against the real agent on a real Mac,
            verified by querying macOS state with osascript. Needs
@@ -61,25 +64,47 @@ RESULTS_FILE = EVALS_DIR / "RESULTS.md"
 
 sys.path.insert(0, str(BACKEND))
 
-with contextlib.redirect_stdout(io.StringIO()):
-    import applescript_validate
-    import audit
-    import code_file_actions
-    import main
-    import permissions
-    import policy_gate
-    import security
-    import tracing
-
-import pyautogui
-from fastapi.testclient import TestClient
-
-
-# --- Harness primitives -----------------------------------------------------
-
 
 class OfflineViolation(Exception):
     """Offline code tried to reach the Mac, a process, or a model."""
+
+
+def _refuse_spawns_except_uname(real):
+    def spawn(args, *rest, **kwargs):
+        program = args[0] if isinstance(args, (list, tuple)) else str(args).split()[0]
+        if Path(str(program)).name == "uname":
+            return real(args, *rest, **kwargs)
+        raise OfflineViolation(f"importing the backend tried to run {args!r}")
+
+    return spawn
+
+
+# Importing the backend must not reach the Mac either. The standard library's
+# `platform` module runs `uname`, which is harmless.
+_real_run, _real_popen = subprocess.run, subprocess.Popen
+subprocess.run = _refuse_spawns_except_uname(_real_run)
+subprocess.Popen = _refuse_spawns_except_uname(_real_popen)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        import applescript_validate
+        import audit
+        import code_file_actions
+        import main
+        import permissions
+        import policy_gate
+        import security
+        import tracing
+
+    import pyautogui
+    from fastapi.testclient import TestClient
+finally:
+    subprocess.run, subprocess.Popen = _real_run, _real_popen
+
+# Captured before offline_guards replaces them, for the handler-injection tasks.
+_REAL_HANDLERS = {"spotify_control": main.spotify_control, "send_message": main.send_message}
+
+
+# --- Harness primitives -----------------------------------------------------
 
 
 class Refused(Exception):
@@ -221,6 +246,12 @@ def _fake_anthropic(spec: dict | None):
 
 OK_RUN = {"stdout": "", "stderr": "", "returncode": 0}
 RUNTIME_ERROR = {"stdout": "", "stderr": "execution error: Can't get window 1 (-1728)", "returncode": 1}
+TIMEOUT_ERROR = {"stdout": "", "stderr": "Error: AppleScript timed out after 30s", "returncode": 1}
+SYNTAX_ERROR = {
+    "stdout": "",
+    "stderr": "12:18: syntax error: Expected end of line but found identifier. (-2741)",
+    "returncode": 1,
+}
 POLICY_BLOCK = {
     "stdout": "",
     "stderr": "Blocked by policy: shell execution from AppleScript is not allowed",
@@ -409,12 +440,12 @@ def run_retry(task: dict) -> tuple[bool, str]:
     def fix_raises(*args, **kwargs):
         raise RuntimeError("repair model unavailable")
 
-    def fails_once():
+    def fails_once(error=RUNTIME_ERROR):
         calls = {"n": 0}
 
         def pipe(script):
             calls["n"] += 1
-            return RUNTIME_ERROR if calls["n"] == 1 else OK_RUN
+            return error if calls["n"] == 1 else OK_RUN
 
         return pipe
 
@@ -434,6 +465,14 @@ def run_retry(task: dict) -> tuple[bool, str]:
             None,
             fix_returning('do shell script "rm -rf ~"'),
         ),
+        "timeout_is_terminal": (spotify, lambda s: TIMEOUT_ERROR, fix_raises),
+        "execution_error_not_rerun_when_confirmed": (spotify, lambda s: RUNTIME_ERROR, fix_returning(spotify)),
+        "syntax_error_repaired_when_confirmed": (spotify, fails_once(SYNTAX_ERROR), fix_returning(spotify)),
+        "invalid_and_disallowed_is_blocked_not_repaired": (
+            'do shell script "open -a Google Chrome https://example.com"',
+            None,
+            fix_raises,
+        ),
     }
     scenario = task["scenario"]
     if scenario not in scenarios:
@@ -443,8 +482,13 @@ def run_retry(task: dict) -> tuple[bool, str]:
     patches = [(main, "fix_applescript_with_claude", fix)]
     if pipe is not None:
         patches.append((main, "_osascript_pipe", pipe))
-    with patched(*patches), tracing.span() as span:
-        result, _ = main.run_applescript(script, "original")
+    token = permissions._confirmed.set(True) if task.get("confirmed") else None
+    try:
+        with patched(*patches), tracing.span() as span:
+            result, _ = main.run_applescript(script, "original")
+    finally:
+        if token is not None:
+            permissions._confirmed.reset(token)
 
     expect = task["expect"]
     c.expect(result["returncode"] == expect["returncode"], f"returncode {result['returncode']}")
@@ -505,6 +549,22 @@ def run_tracing(task: dict) -> tuple[bool, str]:
         c.expect(tracing.current() is None, "recording outside a command opened a trace")
         return c.outcome("recording outside a command is a no-op")
 
+    if scenario == "command_raises":
+
+        async def crashes(data, cmd):
+            raise RuntimeError("handler crashed")
+
+        with patched((main, "_run_text_command", crashes)):
+            result = asyncio.run(
+                main._execute_command({"command": "open notes"}, "open notes", "applescript_general", "act")
+            )
+        rows = audit.recent(1)
+        row = rows[0] if rows else {}
+        c.expect("error" in result, f"the crash was not reported to the caller: {result}")
+        c.expect(row.get("decision") == "failed", f"audit decision {row.get('decision')!r}, expected 'failed'")
+        c.expect("RuntimeError" in (row.get("error") or ""), f"audit error {row.get('error')!r} does not name the crash")
+        return c.outcome("crash recorded as a failed command")
+
     generation = task["generation"]
     outcomes = list(task.get("osascript_results", ["ok"]))
 
@@ -528,6 +588,10 @@ def run_tracing(task: dict) -> tuple[bool, str]:
     ]
     if not task.get("real_pipe"):
         patches.append((main, "_osascript_pipe", pipe))
+    elif task.get("fake_osascript"):
+        patches.append(
+            (subprocess, "run", lambda args, **kw: types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+        )
     with patched(*patches):
         if task.get("via_http"):
             TestClient(main.app, raise_server_exceptions=False).post(
@@ -551,6 +615,11 @@ def run_tracing(task: dict) -> tuple[bool, str]:
     decisions = [r["decision"] for r in rows]
     for decision in task.get("expect_audit_decisions") or []:
         c.expect(decision in decisions, f"audit lacks {decision!r} (has {decisions})")
+    if task.get("expect_script_contains"):
+        c.expect(
+            task["expect_script_contains"] in (row.get("script") or ""),
+            f"audit did not record the executed script (script column: {row.get('script')!r})",
+        )
     return c.outcome(
         f"tokens {row.get('input_tokens')}/{row.get('output_tokens')}, repairs {row.get('repair_attempts')}"
     )
@@ -618,6 +687,47 @@ def run_stats(task: dict) -> tuple[bool, str]:
         else:
             c.expect(actual == value, f"stats[{key!r}] = {actual!r}, expected {value!r}")
     return c.outcome(f"{stats.get('commands')} commands aggregated")
+
+
+def _blank_literals(script: str) -> str:
+    return re.sub(r'"((?:[^"\\]|\\.)*)"', '""', script)
+
+
+def _handler_scripts(handler: str, value: str) -> list[str]:
+    """The AppleScript a built-in handler builds for `value`, captured instead of run."""
+    scripts: list[str] = []
+
+    def capture(args, **kwargs):
+        scripts.append(args[-1])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patched((subprocess, "run", capture)):
+        if handler == "spotify_play":
+            asyncio.run(_REAL_HANDLERS["spotify_control"]({"command": f"play {value} on spotify"}))
+        elif handler == "imessage":
+            asyncio.run(_REAL_HANDLERS["send_message"]({"command": f"text 5551234567 saying {value}"}))
+        elif handler == "contacts_lookup":
+            main._lookup_contact_phone(value)
+        else:
+            raise ValueError(f"unknown handler {handler!r}")
+    return scripts
+
+
+def run_handler_injection(task: dict) -> tuple[bool, str]:
+    """A crafted value must stay inside its string literal in a handler's script."""
+    c = Checks()
+    benign = _handler_scripts(task["handler"], task["benign"])
+    crafted = _handler_scripts(task["handler"], task["crafted"])
+    c.expect(benign and crafted, "the handler built no AppleScript")
+    c.expect(
+        [_blank_literals(s) for s in benign] == [_blank_literals(s) for s in crafted],
+        "the crafted value changed the script's code outside string literals",
+    )
+    c.expect(
+        all(task["payload_marker"] not in _blank_literals(s) for s in crafted),
+        f"{task['payload_marker']!r} reached executable code",
+    )
+    return c.outcome(f"{len(crafted)} script(s); the value stayed inside its literal")
 
 
 def run_token_storage(task: dict) -> tuple[bool, str]:
@@ -735,6 +845,7 @@ EXECUTORS = {
     "migration": run_migration,
     "stats": run_stats,
     "token_storage": run_token_storage,
+    "handler_injection": run_handler_injection,
     "live": run_live,
 }
 
@@ -750,6 +861,27 @@ def _replayable_pop(pending_id: str):
 def _tell_application_only(script: str) -> list[str]:
     """The v2 Phase 1 allowlist check, which only recognised `tell application`."""
     return re.findall(r'\btell\s+app(?:lication)?\s+(?:process\s+)?"([^"]+)"', script, re.IGNORECASE)
+
+
+_ORIGINAL_LEX = policy_gate._lex
+
+
+def _lex_ignoring_comments(script: str) -> tuple[str, str]:
+    """The first gate's view of a script: quotes paired with no knowledge of comments."""
+    return script, re.sub(r'"((?:[^"\\]|\\.)*)"', '""', script)
+
+
+def _lex_keeping_literals(script: str) -> tuple[str, str]:
+    """A gate that forgets to blank string literals before matching."""
+    code, _ = _ORIGINAL_LEX(script)
+    return code, code
+
+
+def _rounded_percentile(sorted_values: list[int], q: float) -> int | None:
+    """The first percentile, which rounded an index instead of using nearest rank."""
+    if not sorted_values:
+        return None
+    return sorted_values[max(0, min(len(sorted_values) - 1, int(round(q * (len(sorted_values) - 1)))))]
 
 
 MUTATIONS = [
@@ -776,7 +908,26 @@ MUTATIONS = [
         "Confirm route does not mark commands confirmed",
         lambda: patched((permissions, "confirmed_context", contextlib.nullcontext)),
     ),
-    ("Bans match inside quoted strings", lambda: patched((policy_gate, "_without_string_literals", lambda s: s))),
+    ("Bans match inside quoted strings", lambda: patched((policy_gate, "_lex", _lex_keeping_literals))),
+    ("Comments not understood by the policy gate", lambda: patched((policy_gate, "_lex", _lex_ignoring_comments))),
+    ("Line comments end only at LF, not CR", lambda: patched((policy_gate, "_LINE_ENDS", "\n"))),
+    (
+        "Applications may be named by variables or indexes",
+        lambda: patched(
+            (policy_gate, "_NON_LITERAL_TARGET", re.compile(r"(?!)")),
+            (policy_gate, "_NON_LITERAL_NAME_FILTER", re.compile(r"(?!)")),
+        ),
+    ),
+    (
+        "Handler values interpolated without escaping",
+        lambda: patched((policy_gate, "applescript_literal", lambda value: f'"{value}"')),
+    ),
+    (
+        "Timed-out or confirmed commands are re-run",
+        lambda: patched((main, "_unsafe_to_rerun", lambda error: error.startswith("Blocked by policy:"))),
+    ),
+    ("Executed scripts not recorded", lambda: patched((tracing, "record_script", lambda script: None))),
+    ("Latency percentile uses a rounded index", lambda: patched((audit, "_percentile", _rounded_percentile))),
     ("Email commands not recognised", lambda: patched((main, "_wants_email_compose", lambda command: False))),
     ("Repair loop disabled", lambda: patched((main, "MAX_REPAIR_ATTEMPTS", 0))),
     ("Token usage not recorded", lambda: patched((tracing, "record_usage", lambda *a, **k: None))),

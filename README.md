@@ -50,8 +50,8 @@ surface, so v2 treats security as the core feature:
 
 - **Pairing-token auth** on every action endpoint (QR-code pairing, deny-by-default middleware)
 - **Tiered permissions** — destructive actions (send email/text, git push, quit everything) require a Confirm tap on your phone before anything runs
-- **Script policy gate** — LLM-generated AppleScript is never executed raw: shell escapes, credential access, file deletion, and non-allowlisted apps are blocked
-- **Append-only audit log** of every command, decision, and result (`~/.imperium/audit.db`)
+- **Script policy gate** — model-generated AppleScript is never executed raw: a gate that lexes scripts the way AppleScript does blocks shell escapes, credential access, file deletion, unconfirmed sends, and apps outside the allowlist, and built-in handlers quote every value taken from a command
+- **Append-only audit log** of every command, decision, result, and executed script (`~/.imperium/audit.db`)
 
 The full threat model is in [SECURITY.md](SECURITY.md).
 
@@ -59,7 +59,7 @@ The full threat model is in [SECURITY.md](SECURITY.md).
 
 `evals/` holds the eval harness: [`tasks.yaml`](evals/tasks.yaml) defines the tasks, [`runner.py`](evals/runner.py) runs them, and [`RESULTS.md`](evals/RESULTS.md) is regenerated on every run.
 
-- **Offline suite** — deterministic checks of auth, the permission gate and confirm flow, the script policy gate, the AppleScript validator, the retry-with-repair loop, tracing, and the audit store. Needs no API key; process spawns, keystrokes, and model calls are intercepted, so it never touches the Mac.
+- **Offline suite** — deterministic checks of auth, the permission gate and confirm flow, the script policy gate, AppleScript injection into built-in handlers, the AppleScript validator, the retry-with-repair loop, tracing, and the audit store. Needs no API key; process spawns, keystrokes, and model calls are intercepted (including while the backend is imported), so it never drives the Mac.
 - **Mutation check** — deliberately breaks each safety property in turn and requires the offline suite to catch it.
 - **Live suite** — real commands on a real Mac, verified by querying macOS state with AppleScript. Anything that would send, push, delete, or quit is refused even if listed.
 

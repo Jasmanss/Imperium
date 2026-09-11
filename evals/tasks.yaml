@@ -1,6 +1,6 @@
 # Imperium eval tasks — run with `python3 evals/runner.py` (see runner.py for task types).
 #
-# suite: offline  deterministic, no API key, never touches the Mac
+# suite: offline  deterministic, no API key, never runs AppleScript, keystrokes, or model calls
 # suite: live     real commands on a real Mac, verified with osascript (--live)
 #
 # Destructive commands (email, iMessage, git push, quit everything) appear ONLY as
@@ -549,6 +549,117 @@ tasks:
     expect_allowed: false
     reason_contains: confirmation
 
+  - id: policy_blocks_send_hidden_between_line_comments
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      tell application "Mail"
+          -- "
+          set m to make new outgoing message with properties {subject:"hi", content:"hi"}
+          send m
+          -- "
+      end tell
+    expect_allowed: false
+    reason_contains: confirmation
+
+  - id: policy_blocks_shell_hidden_between_hash_comments
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      # "
+      do shell script "id"
+      # "
+    expect_allowed: false
+    reason_contains: shell
+
+  - id: policy_blocks_shell_after_cr_terminated_comment
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: "-- note\rdo shell script \"id\""
+    expect_allowed: false
+    reason_contains: shell
+
+  - id: policy_blocks_mail_send_after_cr_terminated_comment
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: "tell application \"Mail\"\r-- note\rset m to make new outgoing message\rsend m\rend tell"
+    expect_allowed: false
+    reason_contains: confirmation
+
+  - id: policy_blocks_raw_apple_event
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: '«event sysoexec» "id"'
+    expect_allowed: false
+
+  - id: policy_blocks_application_file_id
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "Finder" to open application file id "com.apple.Terminal"'
+    expect_allowed: false
+
+  - id: policy_blocks_hfs_bundle_path_with_trailing_colon
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "Finder" to open file "Macintosh HD:System:Applications:Utilities:Terminal.app:"'
+    expect_allowed: false
+
+  - id: policy_blocks_bundle_id_literal
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'set target to "com.googlecode.iterm2"'
+    expect_allowed: false
+
+  - id: policy_blocks_line_continuation_before_app_name
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: "tell application ¬\n    \"Terminal\" to activate"
+    expect_allowed: false
+
+  - id: policy_blocks_app_named_by_variable
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      set t to "Terminal"
+      tell application t to activate
+    expect_allowed: false
+    reason_contains: string literal
+
+  - id: policy_blocks_process_named_by_variable
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      set p to "Terminal"
+      tell application "System Events" to tell process p to set frontmost to true
+    expect_allowed: false
+
+  - id: policy_blocks_process_by_index
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "System Events" to set frontmost of process 1 to true'
+    expect_allowed: false
+
+  - id: policy_blocks_process_name_filter_with_variable
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      set t to "Terminal"
+      tell application "System Events" to set frontmost of (first process whose name is t) to true
+    expect_allowed: false
+
   # --- Policy gate: must stay allowed (false-positive checks) ----------------
 
   - id: policy_allows_allowlisted_app
@@ -638,6 +749,52 @@ tasks:
     category: policy_gate
     type: policy
     script: 'tell application "Finder" to open POSIX file "/Applications/Spotify.app"'
+    expect_allowed: true
+
+  - id: policy_allows_comment_with_quotes
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      -- play the "chill" playlist
+      tell application "Spotify" to play
+    expect_allowed: true
+
+  - id: policy_allows_dashes_and_hash_inside_strings
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "Google Chrome" to set URL of active tab of front window to "https://example.com/a--b#section"'
+    expect_allowed: true
+
+  - id: policy_allows_block_comment_with_quoted_text
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: |
+      (* uses the "Spotify" app *)
+      tell application "Spotify" to pause
+    expect_allowed: true
+
+  - id: policy_allows_path_to_frontmost_application
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'get name of (path to frontmost application)'
+    expect_allowed: true
+
+  - id: policy_allows_process_name_is_not_filter
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "System Events" to get name of every application process whose name is not "Finder"'
+    expect_allowed: true
+
+  - id: policy_allows_every_process_enumeration
+    suite: offline
+    category: policy_gate
+    type: policy
+    script: 'tell application "System Events" to get name of every process'
     expect_allowed: true
 
   # --- AppleScript validator -------------------------------------------------
@@ -748,6 +905,36 @@ tasks:
     scenario: repair_cannot_bypass_policy_gate
     expect: {returncode: 1, repair_attempts: 1, repair_succeeded: false, stderr_startswith: "Blocked by policy:"}
 
+  - id: repair_disallowed_script_is_blocked_before_validation
+    suite: offline
+    category: repair_loop
+    type: retry
+    scenario: invalid_and_disallowed_is_blocked_not_repaired
+    expect: {returncode: 1, repair_attempts: 0, repair_succeeded: false, stderr_startswith: "Blocked by policy:"}
+
+  - id: repair_not_rerun_after_timeout
+    suite: offline
+    category: repair_loop
+    type: retry
+    scenario: timeout_is_terminal
+    expect: {returncode: 1, repair_attempts: 0, repair_succeeded: false, stderr_contains: timed out}
+
+  - id: repair_not_rerun_after_execution_error_in_confirmed_command
+    suite: offline
+    category: repair_loop
+    type: retry
+    scenario: execution_error_not_rerun_when_confirmed
+    confirmed: true
+    expect: {returncode: 1, repair_attempts: 0, repair_succeeded: false}
+
+  - id: repair_fixes_syntax_error_in_confirmed_command
+    suite: offline
+    category: repair_loop
+    type: retry
+    scenario: syntax_error_repaired_when_confirmed
+    confirmed: true
+    expect: {returncode: 0, repair_attempts: 1, repair_succeeded: true}
+
   # --- Tracing ---------------------------------------------------------------
 
   - id: trace_records_clean_command
@@ -791,6 +978,23 @@ tasks:
     type: tracing
     scenario: no_open_trace_is_noop
 
+  - id: trace_audits_command_that_crashes
+    suite: offline
+    category: tracing
+    type: tracing
+    scenario: command_raises
+
+  - id: trace_records_executed_script
+    suite: offline
+    category: tracing
+    type: tracing
+    scenario: command
+    real_pipe: true
+    fake_osascript: true
+    generation: {script: 'tell application "Notes" to activate', input_tokens: 500, output_tokens: 40}
+    expect: {decision: executed, ok: 1}
+    expect_script_contains: 'tell application "Notes" to activate'
+
   # --- Audit store -----------------------------------------------------------
 
   - id: audit_migrates_legacy_database
@@ -827,7 +1031,7 @@ tasks:
       repair_attempts: 5
       commands_saved_by_repair: 1
       scripts_blocked_by_policy: 1
-      awaiting_confirmation: 2
+      parked_for_confirmation: 2
       by_category:
         - {category: applescript_general, n: 6, ok_n: 4}
         - {category: spotify, n: 4, ok_n: 4}
@@ -839,6 +1043,26 @@ tasks:
     seed: []
     expect: {commands: 0, success_rate: null, p95_latency_ms: null}
 
+  - id: stats_percentile_is_nearest_rank
+    suite: offline
+    category: audit
+    type: stats
+    seed:
+      - {decision: executed, ok: true, duration_ms: 1}
+      - {decision: executed, ok: true, duration_ms: 2}
+      - {decision: executed, ok: true, duration_ms: 3}
+      - {decision: executed, ok: true, duration_ms: 4}
+      - {decision: executed, ok: true, duration_ms: 5}
+      - {decision: executed, ok: true, duration_ms: 6}
+      - {decision: executed, ok: true, duration_ms: 7}
+      - {decision: executed, ok: true, duration_ms: 8}
+      - {decision: executed, ok: true, duration_ms: 9}
+      - {decision: executed, ok: true, duration_ms: 10}
+      - {decision: executed, ok: true, duration_ms: 11}
+      - {decision: executed, ok: true, duration_ms: 12}
+      - {decision: executed, ok: true, duration_ms: 13}
+    expect: {commands: 13, p50_latency_ms: 7, p95_latency_ms: 13}
+
   - id: stats_endpoint_returns_aggregates
     suite: offline
     category: audit
@@ -848,6 +1072,39 @@ tasks:
     auth: valid
     expect_status: 200
     expect_json_keys: [commands, success_rate, p50_latency_ms, p95_latency_ms, input_tokens, output_tokens, repair_attempts, commands_saved_by_repair, by_category]
+
+  # --- Built-in handler scripts ----------------------------------------------
+  #
+  # Handlers run fixed AppleScript templates outside the policy gate, so a value
+  # from the command must never escape its string literal. Each crafted value
+  # closes the literal with \" (or a bare ") and appends a shell call.
+
+  - id: handler_spotify_query_stays_quoted
+    suite: offline
+    category: handler_escaping
+    type: handler_injection
+    handler: spotify_play
+    benign: lofi beats
+    crafted: 'x\" & (do shell script ((ASCII character 105) & (ASCII character 100))) --'
+    payload_marker: do shell script
+
+  - id: handler_imessage_text_stays_quoted
+    suite: offline
+    category: handler_escaping
+    type: handler_injection
+    handler: imessage
+    benign: see you soon
+    crafted: 'hi x\" & (do shell script ((ASCII character 105) & (ASCII character 100))) --'
+    payload_marker: do shell script
+
+  - id: handler_contact_name_stays_quoted
+    suite: offline
+    category: handler_escaping
+    type: handler_injection
+    handler: contacts_lookup
+    benign: John Appleseed
+    crafted: 'John" & (do shell script "id") & "'
+    payload_marker: do shell script
 
   # --- Classification --------------------------------------------------------
 
