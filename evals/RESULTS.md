@@ -1,23 +1,26 @@
 # Eval Results
 
-_Generated 2026-09-10 21:29 on commit `cfb29d9` by `python3 evals/runner.py`. Do not edit by hand._
+_Generated 2026-09-11 20:00 on commit `3b31a44` by `python3 evals/runner.py`. Do not edit by hand._
 
 ## Summary
 
 | Suite | Measures | Result |
 |---|---|---|
-| Offline | Safety and reliability layers (regression suite, must stay at 100%) | **142/142 passed** |
-| Mutation check | Deliberately broken safety properties the offline suite detects | **23/23 caught** |
+| Offline | Safety and reliability layers (regression suite, must stay at 100%) | **173/173 passed** |
+| Mutation check | Deliberately broken safety properties the offline suite detects | **47/47 caught** |
 | Live | End-to-end task success on a real Mac | Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set) |
 
 ## Offline suite by category
 
 | Category | Passed |
 |---|---|
-| audit | 5/5 |
-| auth | 22/22 |
+| audit | 9/9 |
+| auth | 27/27 |
 | classification | 17/17 |
-| confirm_flow | 8/8 |
+| command_worker | 3/3 |
+| confirm_flow | 16/16 |
+| event_stream | 9/9 |
+| frontend_host | 2/2 |
 | handler_escaping | 3/3 |
 | permission_gate | 6/6 |
 | policy_gate | 57/57 |
@@ -31,29 +34,53 @@ Each row deliberately breaks one safety property in memory, then reruns the offl
 
 | Mutation | Caught | Detected by |
 |---|---|---|
-| Auth middleware treats every path as public | yes | `auth_rejects_missing_token`, `auth_rejects_wrong_token`, `auth_rejects_truncated_token` +11 more |
-| Token comparison accepts any token | yes | `auth_rejects_wrong_token`, `auth_rejects_truncated_token`, `auth_rejects_extended_token` |
-| Destructive actions skip confirmation | yes | `gate_parks_imessage`, `gate_parks_email`, `gate_parks_git_push` +8 more |
-| Pending confirmations are replayable | yes | `confirm_id_is_single_use` |
-| Pending confirmations never expire | yes | `confirm_id_expires_after_ttl` |
-| Policy gate allows every script | yes | `gate_blocks_send_when_classifier_misses_it`, `policy_blocks_shell_escape`, `policy_blocks_shell_escape_any_case` +41 more |
+| Auth middleware treats every path as public | yes | `auth_rejects_missing_token`, `auth_rejects_wrong_token`, `auth_rejects_truncated_token` +17 more |
+| Token comparison accepts any token | yes | `auth_rejects_wrong_token`, `auth_rejects_truncated_token`, `auth_rejects_extended_token` +3 more |
+| Destructive actions skip confirmation | yes | `gate_parks_imessage`, `gate_parks_email`, `gate_parks_git_push` +18 more |
+| Pending confirmations are replayable | yes | `confirm_id_is_single_use`, `confirm_cancel_revokes_the_pending_id` |
+| Pending confirmations never expire | yes | `confirm_id_expires_after_ttl`, `confirm_unknown_or_expired_ids_change_nothing`, `confirm_pending_list_never_shows_expired` |
+| Policy gate allows every script | yes | `gate_blocks_send_when_classifier_misses_it`, `policy_blocks_shell_escape`, `policy_blocks_shell_escape_any_case` +42 more |
 | App allowlist is not enforced | yes | `gate_blocks_send_when_classifier_misses_it`, `policy_blocks_non_allowlisted_app`, `policy_blocks_non_allowlisted_app_short_form` +12 more |
 | Allowlist only checks `tell application` (the Phase 1 gate) | yes | `policy_blocks_activate_application_form`, `policy_blocks_launch_application_form`, `policy_blocks_system_events_process_form` +4 more |
 | Running strings as AppleScript not banned | yes | `policy_blocks_run_script_string_eval`, `policy_blocks_load_script` |
-| Mail and Messages sends skip confirmation | yes | `gate_blocks_send_when_classifier_misses_it`, `confirm_marks_only_confirmed_commands`, `policy_blocks_unconfirmed_mail_send` +7 more |
-| Confirm route does not mark commands confirmed | yes | `confirm_marks_only_confirmed_commands` |
+| Mail and Messages sends skip confirmation | yes | `gate_blocks_send_when_classifier_misses_it`, `confirm_marks_only_confirmed_commands`, `policy_blocks_unconfirmed_mail_send` +8 more |
+| Confirm route does not mark commands confirmed | yes | `confirm_marks_only_confirmed_commands`, `worker_keeps_confirmed_context_and_trace` |
 | Bans match inside quoted strings | yes | `policy_allows_password_inside_email_text`, `policy_allows_shutdown_inside_note_text`, `policy_allows_send_inside_mail_draft_text` |
 | Comments not understood by the policy gate | yes | `policy_blocks_send_hidden_between_line_comments`, `policy_blocks_shell_hidden_between_hash_comments`, `policy_allows_block_comment_with_quoted_text` |
 | Line comments end only at LF, not CR | yes | `policy_blocks_shell_after_cr_terminated_comment`, `policy_blocks_mail_send_after_cr_terminated_comment` |
 | Applications may be named by variables or indexes | yes | `policy_blocks_app_named_by_variable`, `policy_blocks_process_named_by_variable`, `policy_blocks_process_by_index` +1 more |
 | Handler values interpolated without escaping | yes | `handler_contact_name_stays_quoted` |
 | Timed-out or confirmed commands are re-run | yes | `repair_not_rerun_after_timeout`, `repair_not_rerun_after_execution_error_in_confirmed_command` |
-| Executed scripts not recorded | yes | `trace_records_executed_script` |
+| Executed scripts not recorded | yes | `events_stream_hello_first_then_command_lifecycle`, `worker_keeps_confirmed_context_and_trace`, `trace_records_executed_script` |
 | Latency percentile uses a rounded index | yes | `stats_percentile_is_nearest_rank` |
-| Email commands not recognised | yes | `gate_parks_email`, `confirm_ids_are_independent`, `classify_email` +3 more |
-| Repair loop disabled | yes | `repair_fixes_runtime_error`, `repair_fixes_validation_error`, `repair_is_bounded` +5 more |
-| Token usage not recorded | yes | `trace_records_clean_command`, `trace_sums_tokens_across_repair`, `trace_records_failed_command` +1 more |
-| Audit schema migration skipped | yes | `gate_parks_imessage`, `gate_blocks_send_when_classifier_misses_it`, `trace_records_clean_command` +9 more |
+| Email commands not recognised | yes | `gate_parks_email`, `confirm_ids_are_independent`, `confirm_details_never_look_anything_up` +6 more |
+| Repair loop disabled | yes | `repair_fixes_runtime_error`, `repair_fixes_validation_error`, `repair_is_bounded` +6 more |
+| Token usage not recorded | yes | `events_stream_hello_first_then_command_lifecycle`, `worker_keeps_confirmed_context_and_trace`, `trace_records_clean_command` +3 more |
+| Audit schema migration skipped | yes | `gate_parks_imessage`, `gate_blocks_send_when_classifier_misses_it`, `confirm_parked_response_describes_the_command` +15 more |
+| command_id and action only added to new audit databases | yes | `audit_migrates_legacy_database`, `audit_migrates_v2_database_to_command_ids` |
+| Audit filters ignored | yes | `audit_migrates_v2_database_to_command_ids`, `audit_pages_and_filters` |
+| Last full audit page points past the end | yes | `audit_pages_and_filters` |
+| API responses cacheable | yes | `auth_api_responses_are_not_cacheable`, `auth_rejections_are_not_cacheable` |
+| Event stream is public | yes | `auth_protects_event_stream` |
+| Cancel does not revoke the pending id | yes | `confirm_cancel_revokes_the_pending_id` |
+| GET /pending lists expired entries | yes | `confirm_pending_list_never_shows_expired` |
+| Parking looks up the recipient in Contacts | yes | `gate_parks_imessage`, `confirm_nothing_runs_before_confirmation`, `confirm_runs_server_stored_command_not_client_input` +15 more |
+| client_id accepted without validation | yes | `confirm_client_id_is_validated` |
+| Commands run concurrently | yes | `worker_runs_commands_one_at_a_time` |
+| Commands run on the event loop | yes | `worker_runs_commands_one_at_a_time`, `worker_keeps_server_responsive_while_a_command_runs`, `worker_keeps_confirmed_context_and_trace` |
+| Worker drops the confirmed context | yes | `confirm_marks_only_confirmed_commands`, `worker_keeps_confirmed_context_and_trace` |
+| Replay ignores Last-Event-ID | yes | `events_replay_only_within_the_boot`, `events_overflowing_subscriber_dropped_and_recoverable`, `events_stream_replays_after_last_event_id` |
+| Replay ignores the boot | yes | `events_replay_only_within_the_boot`, `events_stream_replays_after_last_event_id` |
+| Event stream subscribers not capped | yes | `events_subscribers_capped_at_eight`, `events_stream_slots_capped_and_released` |
+| Overflowing subscribers never dropped | yes | `events_overflowing_subscriber_dropped_and_recoverable` |
+| Subscriber queue outgrows the replay buffer | yes | `events_overflowing_subscriber_dropped_and_recoverable` |
+| Hello frame carries the pairing URL | yes | `events_stream_hello_first_then_command_lifecycle`, `events_stream_replays_after_last_event_id`, `events_stream_slots_capped_and_released` +1 more |
+| CSP allows inline scripts | yes | `frontend_csp_hashes_match_export_scripts`, `frontend_fallback_page_when_export_missing` |
+| Framing allowed (frame-ancestors and X-Frame-Options dropped) | yes | `frontend_csp_hashes_match_export_scripts`, `frontend_fallback_page_when_export_missing` |
+| CSP hashes scripts a browser never runs | yes | `frontend_csp_hashes_match_export_scripts` |
+| Comments do not hide scripts from the CSP tokenizer | yes | `frontend_csp_hashes_match_export_scripts` |
+| Newlines not normalized before hashing | yes | `frontend_csp_hashes_match_export_scripts` |
+| Script text ends at the first </script> | yes | `frontend_csp_hashes_match_export_scripts` |
 
 ## Live suite
 
@@ -81,6 +108,11 @@ Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set). 11
 | `auth_protects_text_command` | offline | auth | pass | HTTP 401 |
 | `auth_protects_confirm` | offline | auth | pass | HTTP 401 |
 | `auth_protects_stats` | offline | auth | pass | HTTP 401 |
+| `auth_protects_pending_list` | offline | auth | pass | HTTP 401 |
+| `auth_protects_pending_cancel` | offline | auth | pass | HTTP 401 |
+| `auth_protects_event_stream` | offline | auth | pass | 6 kinds of bad auth refused |
+| `auth_api_responses_are_not_cacheable` | offline | auth | pass | HTTP 200 |
+| `auth_rejections_are_not_cacheable` | offline | auth | pass | HTTP 401 |
 | `auth_options_request_never_reaches_handler` | offline | auth | pass | HTTP 405 |
 | `auth_removed_git_route_stays_removed` | offline | auth | pass | HTTP 404 |
 | `auth_removed_message_route_stays_removed` | offline | auth | pass | HTTP 404 |
@@ -99,6 +131,14 @@ Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set). 11
 | `confirm_requires_auth` | offline | confirm_flow | pass | confirm requires auth |
 | `confirm_ids_are_independent` | offline | confirm_flow | pass | ids are independent |
 | `confirm_marks_only_confirmed_commands` | offline | confirm_flow | pass | confirmation marks only confirmed commands |
+| `confirm_parked_response_describes_the_command` | offline | confirm_flow | pass | parked response describes the command |
+| `confirm_details_never_look_anything_up` | offline | confirm_flow | pass | details never look anything up |
+| `confirm_client_id_is_validated` | offline | confirm_flow | pass | client id validation |
+| `confirm_cancel_revokes_the_pending_id` | offline | confirm_flow | pass | cancel revokes |
+| `confirm_cancel_requires_auth` | offline | confirm_flow | pass | cancel requires auth |
+| `confirm_unknown_or_expired_ids_change_nothing` | offline | confirm_flow | pass | unknown and expired ids have no side effects |
+| `confirm_pending_list_never_shows_expired` | offline | confirm_flow | pass | pending list excludes expired |
+| `confirm_keeps_command_and_client_ids` | offline | confirm_flow | pass | confirm keeps command ids |
 | `policy_blocks_shell_escape` | offline | policy_gate | pass | shell execution from AppleScript is not allowed |
 | `policy_blocks_shell_escape_any_case` | offline | policy_gate | pass | shell execution from AppleScript is not allowed |
 | `policy_blocks_shell_escape_odd_whitespace` | offline | policy_gate | pass | shell execution from AppleScript is not allowed |
@@ -173,6 +213,20 @@ Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set). 11
 | `repair_not_rerun_after_timeout` | offline | repair_loop | pass | rc=1, repairs=0 |
 | `repair_not_rerun_after_execution_error_in_confirmed_command` | offline | repair_loop | pass | rc=1, repairs=0 |
 | `repair_fixes_syntax_error_in_confirmed_command` | offline | repair_loop | pass | rc=0, repairs=1 |
+| `events_delivered_in_order_across_threads` | offline | event_stream | pass | 60 events from 2 threads, in order |
+| `events_replay_only_within_the_boot` | offline | event_stream | pass | 9 Last-Event-ID values |
+| `events_subscribers_capped_at_eight` | offline | event_stream | pass | capped at 8 |
+| `events_overflowing_subscriber_dropped_and_recoverable` | offline | event_stream | pass | dropped after 65 unread events |
+| `events_buffer_keeps_last_200` | offline | event_stream | pass | kept the last 200 |
+| `events_stream_hello_first_then_command_lifecycle` | offline | event_stream | pass | 21 frames |
+| `events_stream_replays_after_last_event_id` | offline | event_stream | pass | replayed within the boot only |
+| `events_stream_slots_capped_and_released` | offline | event_stream | pass | 8 streams, then 429 |
+| `events_stream_heartbeat_while_idle` | offline | event_stream | pass | ping sent while idle |
+| `worker_runs_commands_one_at_a_time` | offline | command_worker | pass | two commands, one at a time on ['imperium-command_0'] |
+| `worker_keeps_server_responsive_while_a_command_runs` | offline | command_worker | pass | the server answered while a command ran |
+| `worker_keeps_confirmed_context_and_trace` | offline | command_worker | pass | confirmation and trace carried onto the worker |
+| `frontend_csp_hashes_match_export_scripts` | offline | frontend_host | pass | 5 running inline scripts hashed |
+| `frontend_fallback_page_when_export_missing` | offline | frontend_host | pass | fallback served under the same headers |
 | `trace_records_clean_command` | offline | tracing | pass | tokens 1200/80, repairs 0 |
 | `trace_sums_tokens_across_repair` | offline | tracing | pass | tokens 1400/100, repairs 1 |
 | `trace_records_failed_command` | offline | tracing | pass | tokens 1500/110, repairs 2 |
@@ -180,11 +234,15 @@ Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set). 11
 | `trace_recording_outside_command_is_noop` | offline | tracing | pass | recording outside a command is a no-op |
 | `trace_audits_command_that_crashes` | offline | tracing | pass | crash recorded as a failed command |
 | `trace_records_executed_script` | offline | tracing | pass | tokens 500/40, repairs 0 |
-| `audit_migrates_legacy_database` | offline | audit | pass | 16 columns, 2 rows |
+| `audit_migrates_legacy_database` | offline | audit | pass | 18 columns, 2 rows |
+| `audit_migrates_v2_database_to_command_ids` | offline | audit | pass | 18 columns, 2 rows |
+| `audit_pages_and_filters` | offline | audit | pass | 10 pages checked |
+| `audit_page_limit_is_clamped` | offline | audit | pass | 205 rows, capped at 200 per page |
 | `stats_aggregates_executions` | offline | audit | pass | 10 commands aggregated |
 | `stats_empty_database` | offline | audit | pass | 0 commands aggregated |
 | `stats_percentile_is_nearest_rank` | offline | audit | pass | 13 commands aggregated |
 | `stats_endpoint_returns_aggregates` | offline | audit | pass | HTTP 200 |
+| `stats_counts_confirmations_and_cancellations` | offline | audit | pass | 2 commands aggregated |
 | `handler_spotify_query_stays_quoted` | offline | handler_escaping | pass | 1 script(s); the value stayed inside its literal |
 | `handler_imessage_text_stays_quoted` | offline | handler_escaping | pass | 1 script(s); the value stayed inside its literal |
 | `handler_contact_name_stays_quoted` | offline | handler_escaping | pass | 1 script(s); the value stayed inside its literal |
