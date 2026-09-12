@@ -176,6 +176,56 @@ tasks:
     auth: none
     expect_status: 401
 
+  - id: auth_protects_pending_list
+    suite: offline
+    category: auth
+    type: http
+    method: GET
+    path: /pending
+    auth: none
+    expect_status: 401
+    expect_json_contains: {error: not paired}
+
+  - id: auth_protects_pending_cancel
+    suite: offline
+    category: auth
+    type: http
+    method: DELETE
+    path: /pending/abc123def456
+    auth: none
+    expect_status: 401
+    forbid_audit: [cancelled]
+
+  # Driven through the ASGI app with bounded reads: if auth regressed, the
+  # stream would stay open forever.
+  - id: auth_protects_event_stream
+    suite: offline
+    category: auth
+    type: sse
+    scenario: requires_auth
+    auth_kinds: [none, wrong, query_param, empty_bearer, no_scheme, truncated]
+
+  - id: auth_api_responses_are_not_cacheable
+    suite: offline
+    category: auth
+    type: http
+    method: GET
+    path: /pending
+    auth: valid
+    expect_status: 200
+    expect_json_keys: [pending, server_time]
+    expect_headers: {Cache-Control: no-store, X-Content-Type-Options: nosniff}
+
+  - id: auth_rejections_are_not_cacheable
+    suite: offline
+    category: auth
+    type: http
+    method: GET
+    path: /audit
+    auth: wrong
+    expect_status: 401
+    expect_headers: {Cache-Control: no-store, X-Content-Type-Options: nosniff}
+
   - id: auth_options_request_never_reaches_handler
     suite: offline
     category: auth
@@ -340,6 +390,93 @@ tasks:
     type: confirm_flow
     scenario: confirmation_marks_only_confirmed_commands
     unconfirmed_command: open notes
+
+  - id: confirm_parked_response_describes_the_command
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: parked_response_describes_the_command
+    command: send a text to 5551234567 saying running late
+    client_id: phone-tab_1
+    expect_details:
+      - {label: To, value: "+15551234567"}
+      - {label: Message, value: running late}
+
+  # Details are built from the handlers' pure parsers only: a named recipient is
+  # shown as typed, and nothing reads Contacts or runs a process before Confirm.
+  - id: confirm_details_never_look_anything_up
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: details_never_look_anything_up
+    cases:
+      - command: send a text to John saying hi
+        expect_details:
+          - {label: To, value: John (looked up in Contacts when you confirm)}
+          - {label: Message, value: hi}
+      - command: send an email to john@example.com saying the meeting moved to 3pm
+        expect_details:
+          - {label: To, value: john@example.com}
+          - {label: Message, value: the meeting moved to 3pm}
+      - command: push Imperium to github
+        expect_details:
+          - {label: Runs, value: git push}
+          - {label: Repository, value: "A folder matching “Imperium” on your Desktop, in Documents, or in Projects; if there is none, the most recently changed Git repository on your Desktop"}
+      - command: close everything
+        expect_details:
+          - {label: Quits, value: Every open app except Finder}
+
+  - id: confirm_client_id_is_validated
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: client_id_validation
+    act_command: open notes
+    cases:
+      - {client_id: phone-1_A, expect: phone-1_A}
+      - {client_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, expect: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+      - {client_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, expect: null}
+      - {client_id: "", expect: null}
+      - {client_id: has space, expect: null}
+      - {client_id: tab.1, expect: null}
+      - {client_id: "<script>", expect: null}
+      - {client_id: "tab\n", expect: null}
+      - {client_id: 12345, expect: null}
+      - {client_id: [phone], expect: null}
+
+  - id: confirm_cancel_revokes_the_pending_id
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: cancel_revokes
+
+  - id: confirm_cancel_requires_auth
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: cancel_requires_auth
+
+  - id: confirm_unknown_or_expired_ids_change_nothing
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: unknown_and_expired_ids_have_no_side_effects
+    second_command: send an email to test@example.com saying hello there
+    age_seconds: 121
+
+  - id: confirm_pending_list_never_shows_expired
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: pending_list_excludes_expired
+    more_commands: [send an email to test@example.com saying hello there, close everything]
+    age_seconds: 121
+
+  - id: confirm_keeps_command_and_client_ids
+    suite: offline
+    category: confirm_flow
+    type: confirm_flow
+    scenario: confirm_keeps_command_ids
 
   # --- Policy gate: blocked --------------------------------------------------
 
@@ -935,6 +1072,154 @@ tasks:
     confirmed: true
     expect: {returncode: 0, repair_attempts: 1, repair_succeeded: true}
 
+  # --- Event stream ----------------------------------------------------------
+
+  # Fewer events in all than a subscriber queue holds, so however the loop is
+  # scheduled against the publishing threads, nothing is dropped for overflow.
+  - id: events_delivered_in_order_across_threads
+    suite: offline
+    category: event_stream
+    type: event_bus
+    scenario: cross_thread_order
+    events_per_thread: 30
+
+  - id: events_replay_only_within_the_boot
+    suite: offline
+    category: event_stream
+    type: event_bus
+    scenario: replay_within_boot
+
+  - id: events_subscribers_capped_at_eight
+    suite: offline
+    category: event_stream
+    type: event_bus
+    scenario: subscriber_cap
+    max_subscribers: 8
+
+  - id: events_overflowing_subscriber_dropped_and_recoverable
+    suite: offline
+    category: event_stream
+    type: event_bus
+    scenario: overflow_drops_subscriber
+
+  - id: events_buffer_keeps_last_200
+    suite: offline
+    category: event_stream
+    type: event_bus
+    scenario: ring_buffer
+    buffer_size: 200
+
+  - id: events_stream_hello_first_then_command_lifecycle
+    suite: offline
+    category: event_stream
+    type: sse
+    scenario: command_lifecycle
+    parked_command: send a text to John saying hi
+    commands:
+      - command: open notes
+        client_id: sse-clean
+        generation: {script: 'tell application "Notes" to activate', input_tokens: 1200, output_tokens: 80}
+        expect_events: [command, started, model_call, script, finished]
+        expect_finished: {ok: true, error: null, input_tokens: 1200, output_tokens: 80, repair_attempts: 0, repair_succeeded: false}
+      - command: open notes
+        client_id: sse-repaired
+        generation: {script: 'set theURL to "https://example.com"', input_tokens: 1000, output_tokens: 60}
+        repair: {script: 'tell application "Google Chrome" to activate', input_tokens: 400, output_tokens: 40}
+        expect_events: [command, started, model_call, repair, model_call, script, finished]
+        expect_finished: {ok: true, input_tokens: 1400, output_tokens: 100, repair_attempts: 1, repair_succeeded: true}
+      - command: open notes
+        client_id: sse-blocked
+        generation: {script: 'do shell script "ls ~"', input_tokens: 700, output_tokens: 30}
+        expect_events: [command, started, model_call, policy_blocked, finished]
+        expect_finished: {ok: false, input_tokens: 700, output_tokens: 30, repair_attempts: 0}
+
+  - id: events_stream_replays_after_last_event_id
+    suite: offline
+    category: event_stream
+    type: sse
+    scenario: replay
+
+  - id: events_stream_slots_capped_and_released
+    suite: offline
+    category: event_stream
+    type: sse
+    scenario: subscriber_slots
+    max_subscribers: 8
+
+  - id: events_stream_heartbeat_while_idle
+    suite: offline
+    category: event_stream
+    type: sse
+    scenario: heartbeat
+    heartbeat_seconds: 0.05
+
+  # --- Command worker --------------------------------------------------------
+
+  - id: worker_runs_commands_one_at_a_time
+    suite: offline
+    category: command_worker
+    type: worker
+    scenario: one_at_a_time
+    commands: [open notes, open calendar]
+    hold_seconds: 2.0
+
+  - id: worker_keeps_server_responsive_while_a_command_runs
+    suite: offline
+    category: command_worker
+    type: worker
+    scenario: stays_responsive
+    command: open notes
+    parked_command: send a text to John saying hi
+    hold_seconds: 3.0
+
+  - id: worker_keeps_confirmed_context_and_trace
+    suite: offline
+    category: command_worker
+    type: worker
+    scenario: keeps_context
+    parked_command: send a text to John saying hi
+    command: open notes
+    input_tokens: 321
+    output_tokens: 45
+    script: tell application "Messages" to activate
+
+  # --- Hosted frontend -------------------------------------------------------
+
+  - id: frontend_csp_hashes_match_export_scripts
+    suite: offline
+    category: frontend_host
+    type: frontend_host
+    scenario: export
+    expect_headers:
+      X-Frame-Options: DENY
+      X-Content-Type-Options: nosniff
+      Referrer-Policy: no-referrer
+      Permissions-Policy: camera=(), microphone=(), geolocation=()
+    expect_csp:
+      default-src: "'self'"
+      object-src: "'none'"
+      base-uri: "'none'"
+      frame-ancestors: "'none'"
+    cache: {html: no-cache, hashed_asset: "public, max-age=31536000, immutable"}
+
+  - id: frontend_fallback_page_when_export_missing
+    suite: offline
+    category: frontend_host
+    type: frontend_host
+    scenario: fallback
+    fallback_contains: has not been built
+    expect_headers:
+      X-Frame-Options: DENY
+      X-Content-Type-Options: nosniff
+      Referrer-Policy: no-referrer
+      Permissions-Policy: camera=(), microphone=(), geolocation=()
+    expect_csp:
+      default-src: "'self'"
+      object-src: "'none'"
+      base-uri: "'none'"
+      frame-ancestors: "'none'"
+    cache: {html: no-cache, hashed_asset: "public, max-age=31536000, immutable"}
+
   # --- Tracing ---------------------------------------------------------------
 
   - id: trace_records_clean_command
@@ -1001,7 +1286,54 @@ tasks:
     suite: offline
     category: audit
     type: migration
-    expect_columns: [input_tokens, output_tokens, api_calls, models, repair_attempts, repair_succeeded]
+    expect_columns: [input_tokens, output_tokens, api_calls, models, repair_attempts, repair_succeeded, command_id, action]
+
+  - id: audit_migrates_v2_database_to_command_ids
+    suite: offline
+    category: audit
+    type: migration
+    legacy_version: 2
+    command_id: 0123456789ab
+    action: Opened Notes
+    expect_columns: [command_id, action]
+
+  - id: audit_pages_and_filters
+    suite: offline
+    category: audit
+    type: audit_page
+    scenario: pages_and_filters
+    expect_row_keys: [id, ts, command, category, tier, decision, script, error, ok, duration_ms, input_tokens, output_tokens, api_calls, models, repair_attempts, repair_succeeded, command_id, action]
+    # Seed rows are referred to by index; before_id and next name a row the same way.
+    seed:
+      - {decision: pending_confirmation, command_id: aaaaaaaaaaaa}
+      - {decision: cancelled, command_id: aaaaaaaaaaaa}
+      - {decision: executed, command_id: bbbbbbbbbbbb, action: Opened Notes}
+      - {decision: pending_confirmation, command_id: cccccccccccc}
+      - {decision: confirmed, command_id: cccccccccccc}
+      - {decision: failed, command_id: cccccccccccc}
+      - {decision: script_blocked, command_id: dddddddddddd}
+    pages:
+      - {params: {limit: 3}, expect: [6, 5, 4], next: 4}
+      - {params: {limit: 3, before_id: 4}, expect: [3, 2, 1], next: 1}
+      - {params: {limit: 3, before_id: 1}, expect: [0], next: null}
+      - {params: {limit: 2, decision: pending_confirmation}, expect: [3, 0], next: null}
+      - {params: {limit: 1, decision: pending_confirmation}, expect: [3], next: 3}
+      - {params: {limit: 1, decision: pending_confirmation, before_id: 3}, expect: [0], next: null}
+      - {params: {command_id: cccccccccccc}, expect: [5, 4, 3], next: null}
+      - {params: {command_id: cccccccccccc, decision: confirmed}, expect: [4], next: null}
+      - {params: {decision: "executed' OR '1'='1"}, expect: [], next: null}
+      - {params: {limit: 0}, expect: [6], next: 6}
+    expect_rows:
+      - params: {command_id: bbbbbbbbbbbb}
+        fields: {decision: executed, action: Opened Notes, command_id: bbbbbbbbbbbb}
+
+  - id: audit_page_limit_is_clamped
+    suite: offline
+    category: audit
+    type: audit_page
+    scenario: limit_is_clamped
+    rows: 205
+    expect_row_keys: [id, ts, command, category, tier, decision, script, error, ok, duration_ms, input_tokens, output_tokens, api_calls, models, repair_attempts, repair_succeeded, command_id, action]
 
   - id: stats_aggregates_executions
     suite: offline
@@ -1032,9 +1364,11 @@ tasks:
       commands_saved_by_repair: 1
       scripts_blocked_by_policy: 1
       parked_for_confirmation: 2
+      confirmed: 0
+      cancelled: 0
       by_category:
-        - {category: applescript_general, n: 6, ok_n: 4}
-        - {category: spotify, n: 4, ok_n: 4}
+        - {category: applescript_general, n: 6, ok_n: 4, p95_latency_ms: 100, input_tokens: 600, output_tokens: 60}
+        - {category: spotify, n: 4, ok_n: 4, p95_latency_ms: 40, input_tokens: 400, output_tokens: 40}
 
   - id: stats_empty_database
     suite: offline
@@ -1071,7 +1405,32 @@ tasks:
     path: /stats
     auth: valid
     expect_status: 200
-    expect_json_keys: [commands, success_rate, p50_latency_ms, p95_latency_ms, input_tokens, output_tokens, repair_attempts, commands_saved_by_repair, by_category]
+    expect_json_keys: [commands, success_rate, p50_latency_ms, p95_latency_ms, input_tokens, output_tokens, repair_attempts, commands_saved_by_repair, scripts_blocked_by_policy, parked_for_confirmation, confirmed, cancelled, by_category]
+
+  # Confirmations and cancellations are counted, but only executions are commands;
+  # categories with equal counts are ordered by name.
+  - id: stats_counts_confirmations_and_cancellations
+    suite: offline
+    category: audit
+    type: stats
+    seed:
+      - {decision: pending_confirmation, category: message_send}
+      - {decision: confirmed, category: message_send}
+      - {decision: executed, ok: true, category: message_send, duration_ms: 300, input_tokens: 0, output_tokens: 0}
+      - {decision: pending_confirmation, category: email_send}
+      - {decision: cancelled, category: email_send}
+      - {decision: pending_confirmation, category: git_push}
+      - {decision: executed, ok: true, category: applescript_general, duration_ms: 120, input_tokens: 900, output_tokens: 70}
+    expect:
+      commands: 2
+      success_rate: 1.0
+      parked_for_confirmation: 3
+      confirmed: 1
+      cancelled: 1
+      scripts_blocked_by_policy: 0
+      by_category:
+        - {category: applescript_general, n: 1, ok_n: 1, p95_latency_ms: 120, input_tokens: 900, output_tokens: 70}
+        - {category: message_send, n: 1, ok_n: 1, p95_latency_ms: 300, input_tokens: 0, output_tokens: 0}
 
   # --- Built-in handler scripts ----------------------------------------------
   #

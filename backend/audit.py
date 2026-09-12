@@ -3,6 +3,10 @@
 Stored in SQLite at ~/.imperium/audit.db. Writes are best-effort: an audit
 failure never blocks or breaks the action itself, but is printed so it is
 not silent.
+
+Every row written for a command carries its `command_id`, so a command's
+parking, confirmation or cancellation, blocked scripts, and result can be read
+back together (`GET /audit?command_id=…`).
 """
 
 from __future__ import annotations
@@ -39,7 +43,18 @@ _ADDED_COLUMNS: list[tuple[str, str]] = [
     ("models", "TEXT"),
     ("repair_attempts", "INTEGER"),
     ("repair_succeeded", "INTEGER"),
+    ("command_id", "TEXT"),
+    ("action", "TEXT"),
 ]
+
+# The row shape `GET /audit` returns, in order.
+ROW_COLUMNS = (
+    "id", "ts", "command", "category", "tier", "decision", "script", "error", "ok",
+    "duration_ms", "input_tokens", "output_tokens", "api_calls", "models",
+    "repair_attempts", "repair_succeeded", "command_id", "action",
+)
+
+_EXECUTED = "decision IN ('executed', 'failed')"
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -68,16 +83,19 @@ def log_event(
     ok: bool | None = None,
     duration_ms: int | None = None,
     trace: dict | None = None,
-) -> None:
+    command_id: str | None = None,
+    action: str | None = None,
+) -> int | None:
+    """Record one row; returns its id, or None if it could not be written."""
     t = trace or {}
     try:
         conn = _connect()
         with conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO audit (ts, command, category, tier, decision, script, error, ok, "
                 "duration_ms, input_tokens, output_tokens, api_calls, models, repair_attempts, "
-                "repair_succeeded) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "repair_succeeded, command_id, action) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     command[:1000],
@@ -94,11 +112,16 @@ def log_event(
                     ",".join(t.get("models", [])) or None,
                     t.get("repair_attempts"),
                     None if t.get("repair_succeeded") is None else int(bool(t.get("repair_succeeded"))),
+                    command_id,
+                    None if action is None else str(action)[:1000],
                 ),
             )
+            row_id = cursor.lastrowid
         conn.close()
+        return row_id
     except sqlite3.Error as e:
         print(f"audit: failed to record event ({e})")
+        return None
 
 
 def stats() -> dict:
@@ -113,31 +136,43 @@ def stats() -> dict:
             "SUM(COALESCE(output_tokens, 0)) AS out_tok, "
             "SUM(COALESCE(repair_attempts, 0)) AS repairs, "
             "SUM(CASE WHEN repair_succeeded = 1 THEN 1 ELSE 0 END) AS repairs_ok "
-            "FROM audit WHERE decision IN ('executed', 'failed')"
+            f"FROM audit WHERE {_EXECUTED}"
         ).fetchone()
-        durations = [
-            row[0]
-            for row in conn.execute(
-                "SELECT duration_ms FROM audit "
-                "WHERE duration_ms IS NOT NULL AND decision IN ('executed', 'failed') "
-                "ORDER BY duration_ms"
+        durations: list[int] = []
+        category_durations: dict[str, list[int]] = {}
+        for row in conn.execute(
+            "SELECT category, duration_ms FROM audit "
+            f"WHERE duration_ms IS NOT NULL AND {_EXECUTED} ORDER BY duration_ms"
+        ):
+            durations.append(row["duration_ms"])
+            category_durations.setdefault(row["category"], []).append(row["duration_ms"])
+        by_category = []
+        for row in conn.execute(
+            "SELECT category, COUNT(*) AS n, "
+            "SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS ok_n, "
+            "SUM(COALESCE(input_tokens, 0)) AS input_tokens, "
+            "SUM(COALESCE(output_tokens, 0)) AS output_tokens "
+            f"FROM audit WHERE {_EXECUTED} "
+            "GROUP BY category ORDER BY n DESC, category"
+        ):
+            by_category.append(
+                {
+                    "category": row["category"],
+                    "n": row["n"],
+                    "ok_n": row["ok_n"],
+                    "p95_latency_ms": _percentile(category_durations.get(row["category"], []), 0.95),
+                    "input_tokens": row["input_tokens"],
+                    "output_tokens": row["output_tokens"],
+                }
             )
-        ]
-        by_category = [
-            dict(row)
+        decisions = {
+            row["decision"]: row["n"]
             for row in conn.execute(
-                "SELECT category, COUNT(*) AS n, "
-                "SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS ok_n "
-                "FROM audit WHERE decision IN ('executed', 'failed') "
-                "GROUP BY category ORDER BY n DESC"
+                "SELECT decision, COUNT(*) AS n FROM audit WHERE decision IN "
+                "('script_blocked', 'pending_confirmation', 'confirmed', 'cancelled') "
+                "GROUP BY decision"
             )
-        ]
-        blocked = conn.execute(
-            "SELECT COUNT(*) FROM audit WHERE decision = 'script_blocked'"
-        ).fetchone()[0]
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM audit WHERE decision = 'pending_confirmation'"
-        ).fetchone()[0]
+        }
         conn.close()
 
         n = totals["n"] or 0
@@ -150,13 +185,30 @@ def stats() -> dict:
             "output_tokens": totals["out_tok"] or 0,
             "repair_attempts": totals["repairs"] or 0,
             "commands_saved_by_repair": totals["repairs_ok"] or 0,
-            "scripts_blocked_by_policy": blocked,
-            "parked_for_confirmation": pending,
+            "scripts_blocked_by_policy": decisions.get("script_blocked", 0),
+            "parked_for_confirmation": decisions.get("pending_confirmation", 0),
+            "confirmed": decisions.get("confirmed", 0),
+            "cancelled": decisions.get("cancelled", 0),
             "by_category": by_category,
         }
     except sqlite3.Error as e:
         print(f"audit: failed to compute stats ({e})")
-        return {}
+        # The shape of an empty log, so the phone never meets a missing field.
+        return {
+            "commands": 0,
+            "success_rate": None,
+            "p50_latency_ms": None,
+            "p95_latency_ms": None,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "repair_attempts": 0,
+            "commands_saved_by_repair": 0,
+            "scripts_blocked_by_policy": 0,
+            "parked_for_confirmation": 0,
+            "confirmed": 0,
+            "cancelled": 0,
+            "by_category": [],
+        }
 
 
 def _percentile(sorted_values: list[int], q: float) -> int | None:
@@ -167,15 +219,55 @@ def _percentile(sorted_values: list[int], q: float) -> int | None:
     return sorted_values[rank - 1]
 
 
+def _query(
+    limit: int,
+    before_id: int | None = None,
+    decision: str | None = None,
+    command_id: str | None = None,
+) -> list[dict]:
+    """Rows newest first, filtered with bound parameters only."""
+    clauses: list[str] = []
+    params: list = []
+    if before_id is not None:
+        clauses.append("id < ?")
+        params.append(before_id)
+    if decision:
+        clauses.append("decision = ?")
+        params.append(decision)
+    if command_id:
+        clauses.append("command_id = ?")
+        params.append(command_id)
+    where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        f"SELECT {', '.join(ROW_COLUMNS)} FROM audit {where}ORDER BY id DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def recent(limit: int = 50) -> list[dict]:
     try:
-        conn = _connect()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        return _query(limit)
     except sqlite3.Error as e:
         print(f"audit: failed to read log ({e})")
         return []
+
+
+def page(
+    limit: int = 50,
+    before_id: int | None = None,
+    decision: str | None = None,
+    command_id: str | None = None,
+) -> dict:
+    """One page of `GET /audit`; next_before_id is None when no older rows match."""
+    try:
+        rows = _query(limit + 1, before_id, decision, command_id)
+    except sqlite3.Error as e:
+        print(f"audit: failed to read log ({e})")
+        return {"entries": [], "next_before_id": None}
+    entries = rows[:limit]
+    more = len(rows) > limit
+    return {"entries": entries, "next_before_id": entries[-1]["id"] if more and entries else None}

@@ -25,6 +25,10 @@ _PUBLIC_PREFIX = "/app"
 
 _token_cache: str | None = None
 
+# Authenticated responses carry commands, scripts, and audit data: browsers and
+# proxies must never store them or reinterpret their content type.
+_API_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+
 
 def get_token() -> str:
     """Load the pairing token, generating it on first run (file mode 0600)."""
@@ -57,14 +61,17 @@ async def auth_middleware(request, call_next):
     header = request.headers.get("authorization", "")
     supplied = header[7:] if header.lower().startswith("bearer ") else ""
     if not supplied or not hmac.compare_digest(supplied, get_token()):
-        return JSONResponse(
+        response = JSONResponse(
             {
                 "error": "Unauthorized — this device is not paired. "
                 "Scan the QR code shown in the Mac terminal to pair."
             },
             status_code=401,
         )
-    return await call_next(request)
+    else:
+        response = await call_next(request)
+    response.headers.update(_API_HEADERS)
+    return response
 
 
 def _lan_ip() -> str:

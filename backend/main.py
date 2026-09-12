@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
 import subprocess
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import anthropic
 import httpx
 import pyautogui
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import Response
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 
 import audit
+import events
+import frontend_host
 import permissions
 import policy_gate
 import security
@@ -149,7 +154,8 @@ from url_shortcuts import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-FRONTEND_DIR = BASE_DIR.parent / "frontend"
+# The Next.js static export (`cd frontend && npm run build`).
+FRONTEND_DIR = BASE_DIR.parent / "frontend" / "out"
 
 try:
     from playwright_automation import (
@@ -805,13 +811,22 @@ def _run_handler_script(script: str, timeout: float) -> subprocess.CompletedProc
     )
 
 
-def _policy_block(script: str) -> dict | None:
+def _policy_block(script: str, action: str = "") -> dict | None:
     """The blocked result if the policy gate refuses the script, else None."""
     allowed, reason = policy_gate.check_script(script)
     if allowed:
         return None
     print(f"POLICY BLOCKED: {reason}")
-    audit.log_event(decision="script_blocked", script=script, error=reason, ok=False)
+    ids = tracing.ids()
+    audit.log_event(
+        decision="script_blocked",
+        script=script,
+        error=reason,
+        ok=False,
+        command_id=ids["command_id"],
+        action=action or None,
+    )
+    events.publish("policy_blocked", reason=reason, **ids)
     return {"stdout": "", "stderr": f"Blocked by policy: {reason}", "returncode": 1}
 
 
@@ -966,7 +981,7 @@ def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
     last_error = ""
 
     for attempt in range(MAX_REPAIR_ATTEMPTS + 1):
-        blocked = _policy_block(script)
+        blocked = _policy_block(script, action)
         if blocked:
             return blocked, action
 
@@ -989,7 +1004,7 @@ def run_applescript(script: str, original_action: str = "") -> tuple[dict, str]:
         if attempt == MAX_REPAIR_ATTEMPTS:
             break
 
-        tracing.record_repair()
+        tracing.record_repair(last_error)
         try:
             script, action = fix_applescript_with_claude(
                 script, static_error, runtime_error=runtime_error
@@ -1995,32 +2010,130 @@ def _classify_command(command: str) -> str:
     return "applescript_general"
 
 
+_CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _client_id(value) -> str | None:
+    """The frontend's own id for a request, or None when absent or malformed."""
+    return value if isinstance(value, str) and _CLIENT_ID.fullmatch(value) else None
+
+
+def _new_command_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _pending_details(category: str, command: str) -> list[dict]:
+    """What a parked command will do, shown on the phone before the user confirms.
+
+    Built only from the handlers' own pure parsers: parking never looks a name up
+    in Contacts, reads the disk, or runs a process, so nothing happens before
+    Confirm.
+    """
+    if category == "message_send":
+        parsed = _parse_text_message(command)
+        recipient = parsed["recipient"]
+        if recipient and not parsed["is_phone"]:
+            recipient = f"{recipient} (looked up in Contacts when you confirm)"
+        rows = [("To", recipient), ("Message", parsed["message"])]
+    elif category == "email_send":
+        parsed = _extract_email_content(command)
+        rows = [
+            ("To", parsed["recipient"]),
+            ("Subject", parsed["subject"]),
+            ("Message", parsed["body"]),
+            ("Attachment", parsed["attachment_file"]),
+        ]
+    elif category == "git_push":
+        folder = _parse_git_command(command)["folder"]
+        fallback = "the most recently changed Git repository on your Desktop"
+        rows = [
+            ("Runs", "git push"),
+            (
+                "Repository",
+                f"A folder matching “{folder}” on your Desktop, in Documents, or in Projects; "
+                f"if there is none, {fallback}"
+                if folder
+                else fallback[0].upper() + fallback[1:],
+            ),
+        ]
+    elif category == "close_all_apps":
+        rows = [("Quits", "Every open app except Finder")]
+    else:
+        rows = []
+    details = [{"label": label, "value": value} for label, value in rows if value]
+    return details or [{"label": "Command", "value": command}]
+
+
+def _parked(pending_id: str, entry: dict, now: float) -> dict:
+    """A parked command as the phone sees it, in the parking response and in GET /pending."""
+    return {
+        "requires_confirmation": True,
+        "pending_id": pending_id,
+        "command_id": entry["command_id"],
+        "client_id": entry["client_id"],
+        "command": entry["command"],
+        "category": entry["category"],
+        "tier": entry["tier"],
+        "details": entry["details"],
+        "created_at": entry["created_at"],
+        "expires_at": permissions.expires_at(entry),
+        "ttl_seconds": permissions.PENDING_TTL_SECONDS,
+        "server_time": now,
+    }
+
+
 @app.post("/text-command")
 async def text_command(data: dict):
     command = data.get("command", "")
-    if not command.strip():
+    if not isinstance(command, str) or not command.strip():
         return {"error": "No command provided"}
 
+    command_id = _new_command_id()
+    client_id = _client_id(data.get("client_id"))
     category = _classify_command(command)
     tier = permissions.tier_for(category)
+    events.publish(
+        "command",
+        command_id=command_id,
+        client_id=client_id,
+        command=command,
+        category=category,
+        tier=tier,
+    )
 
     if permissions.needs_confirmation(tier):
-        pending_id = permissions.create_pending(command, category)
+        action = f"This is a {tier} action ({category.replace('_', ' ')}) — confirm to execute."
+        pending_id, entry = permissions.create_pending(
+            command,
+            category,
+            tier=tier,
+            command_id=command_id,
+            client_id=client_id,
+            details=_pending_details(category, command),
+            action=action,
+        )
         audit.log_event(
             decision="pending_confirmation",
             command=command,
             category=category,
             tier=tier,
+            command_id=command_id,
+            action=action,
         )
-        return {
-            "transcript": command,
-            "requires_confirmation": True,
-            "pending_id": pending_id,
-            "category": category,
-            "action": f"This is a {tier} action ({category.replace('_', ' ')}) — confirm to execute.",
-        }
+        parked = _parked(pending_id, entry, time.time())
+        events.publish(
+            "pending",
+            command_id=command_id,
+            client_id=client_id,
+            pending_id=pending_id,
+            category=category,
+            tier=tier,
+            details=parked["details"],
+            expires_at=parked["expires_at"],
+        )
+        return {"transcript": command, "action": action, **parked}
 
-    return await _execute_command(data, command, category, tier)
+    return await _execute_command(data, command, category, tier, command_id, client_id)
 
 
 @app.post("/confirm/{pending_id}")
@@ -2029,25 +2142,88 @@ async def confirm_pending(pending_id: str):
     entry = permissions.pop_pending(pending_id)
     if entry is None:
         return {"error": "Confirmation expired or already used — send the command again."}
+    tier = permissions.tier_for(entry["category"])
     audit.log_event(
         decision="confirmed",
         command=entry["command"],
         category=entry["category"],
-        tier=permissions.tier_for(entry["category"]),
+        tier=tier,
+        command_id=entry["command_id"],
+        action=entry["action"],
+    )
+    events.publish(
+        "confirmed",
+        command_id=entry["command_id"],
+        client_id=entry["client_id"],
+        pending_id=pending_id,
     )
     with permissions.confirmed_context():
         return await _execute_command(
             {"command": entry["command"]},
             entry["command"],
             entry["category"],
-            permissions.tier_for(entry["category"]),
+            tier,
+            entry["command_id"],
+            entry["client_id"],
+        )
+
+
+@app.delete("/pending/{pending_id}")
+async def cancel_pending(pending_id: str):
+    """Revoke a parked command: its id can never be confirmed, and nothing runs."""
+    entry = permissions.cancel_pending(pending_id)
+    if entry is None:
+        return JSONResponse({"error": "Confirmation expired or already used."}, status_code=404)
+    audit.log_event(
+        decision="cancelled",
+        command=entry["command"],
+        category=entry["category"],
+        tier=entry["tier"],
+        command_id=entry["command_id"],
+        action=entry["action"],
+    )
+    events.publish(
+        "cancelled",
+        command_id=entry["command_id"],
+        client_id=entry["client_id"],
+        pending_id=pending_id,
+    )
+    return {"cancelled": True, "pending_id": pending_id, "command_id": entry["command_id"]}
+
+
+@app.get("/pending")
+async def list_pending():
+    """Commands waiting for Confirm, oldest first; expired ones are never listed."""
+    now = time.time()
+    return {
+        "pending": [_parked(pending_id, entry, now) for pending_id, entry in permissions.list_pending()],
+        "server_time": now,
+    }
+
+
+@app.get("/events")
+async def event_stream(request: Request):
+    """Live command events as Server-Sent Events (auth required, like every action route)."""
+    try:
+        return events.open_stream(request.headers.get("last-event-id"))
+    except events.TooManySubscribers:
+        return JSONResponse(
+            {"error": "Too many open event streams — close the app on another device or tab and retry."},
+            status_code=429,
         )
 
 
 @app.get("/audit")
-async def audit_log(limit: int = 50):
-    """Recent audit entries (auth required, like every action route)."""
-    return {"entries": audit.recent(min(max(limit, 1), 200))}
+async def audit_log(
+    limit: int = 50,
+    before_id: Optional[int] = None,
+    decision: Optional[str] = None,
+    command_id: Optional[str] = None,
+):
+    """Audit entries newest first, paged with before_id (auth required, like every action route)."""
+    return audit.page(
+        min(max(limit, 1), 200), before_id=before_id, decision=decision, command_id=command_id
+    )
 
 
 @app.get("/stats")
@@ -2056,27 +2232,104 @@ async def execution_stats():
     return audit.stats()
 
 
-async def _execute_command(data: dict, command: str, category: str, tier: str) -> dict:
-    """Run a command that has passed the permission gate, with tracing and audit logging."""
+def _new_command_worker() -> ThreadPoolExecutor:
+    """The one thread commands run on. Commands drive the GUI, so never two at once."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="imperium-command")
+
+
+_command_worker = _new_command_worker()
+
+
+async def _execute_command(
+    data: dict,
+    command: str,
+    category: str,
+    tier: str,
+    command_id: str | None = None,
+    client_id: str | None = None,
+) -> dict:
+    """Run a command that has passed the permission gate on the command worker, and wait for it.
+
+    Handlers block in subprocess.run and time.sleep. Awaited on the event loop they
+    froze the whole server — the event stream, /pending, and cancel included — for
+    as long as a command ran. The worker runs inside a copy of this context, so the
+    confirmed flag set by /confirm carries over to it. Tracing, the audit row, and
+    the events all happen on the worker too: a command still waiting its turn is
+    never reported as started, and one whose request goes away is still audited.
+    """
+    context = contextvars.copy_context()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _command_worker,
+        context.run,
+        _run_command,
+        data,
+        command,
+        category,
+        tier,
+        command_id or _new_command_id(),
+        client_id,
+    )
+
+
+def _run_command(
+    data: dict, command: str, category: str, tier: str, command_id: str, client_id: str | None
+) -> dict:
+    """The worker thread's entry point: one command on an event loop of its own."""
+    return asyncio.run(_command(data, command, category, tier, command_id, client_id))
+
+
+async def _command(
+    data: dict, command: str, category: str, tier: str, command_id: str, client_id: str | None
+) -> dict:
+    """One command, with tracing, audit logging, and events."""
     started = time.time()
-    with tracing.span() as span:
+    events.publish(
+        "started", command_id=command_id, client_id=client_id, category=category, tier=tier
+    )
+    with tracing.span(command_id, client_id) as span:
         try:
             result = await _run_text_command(data, command)
         except Exception as e:
             result = {"transcript": command, "error": f"Command failed: {type(e).__name__}: {e}"}
     ok = not result.get("error") and result.get("osascript_ok", True) is not False
-    audit.log_event(
+    error = str(result.get("error") or result.get("osascript_error") or "")[:500]
+    duration_ms = int((time.time() - started) * 1000)
+    audit_id = audit.log_event(
         decision="executed" if ok else "failed",
         command=command,
         category=category,
         tier=tier,
         script="\n\n".join(span["scripts"]),
-        error=str(result.get("error") or result.get("osascript_error") or "")[:500],
+        error=error,
         ok=ok,
-        duration_ms=int((time.time() - started) * 1000),
+        duration_ms=duration_ms,
         trace=span,
+        command_id=command_id,
+        action=result.get("action"),
     )
-    return result
+    events.publish(
+        "finished",
+        command_id=command_id,
+        client_id=client_id,
+        ok=ok,
+        action=result.get("action"),
+        error=error or None,
+        duration_ms=duration_ms,
+        input_tokens=span["input_tokens"],
+        output_tokens=span["output_tokens"],
+        repair_attempts=span["repair_attempts"],
+        repair_succeeded=span["repair_succeeded"],
+        audit_id=audit_id,
+    )
+    return {
+        **result,
+        "command_id": command_id,
+        "client_id": client_id,
+        "ok": ok,
+        "duration_ms": duration_ms,
+        "audit_id": audit_id,
+    }
 
 
 async def _run_text_command(data: dict, command: str) -> dict:
@@ -2155,11 +2408,19 @@ async def _run_text_command(data: dict, command: str) -> dict:
     }
 
 
-app.mount(
-    "/app",
-    StaticFiles(directory=str(FRONTEND_DIR), html=True),
-    name="frontend",
-)
+# Public like the old page: the frontend is useless without a paired token. The
+# host adds a hashed Content-Security-Policy and framing, sniffing, referrer, and
+# caching headers to every /app response, and serves a build-instructions page
+# when frontend/out has not been built.
+frontend = frontend_host.FrontendHost(FRONTEND_DIR)
+
+
+@app.api_route("/app", methods=["GET", "HEAD"], include_in_schema=False)
+async def frontend_index_redirect():
+    return frontend.redirect("/app/")
+
+
+app.mount("/app", frontend, name="frontend")
 
 
 if __name__ == "__main__":

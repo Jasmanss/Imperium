@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/*
+ * The Imperium console theme.
+ *
+ * Colours are semantic and mean the same thing on every screen (see
+ * src/lib/labels.ts): tiers are read (neutral), act (act), destructive
+ * (danger); decisions are executed (ok), failed (danger), script_blocked
+ * (blocked), pending (pending), confirmed (act), cancelled (muted).
+ *
+ * There are no web fonts: the backend's CSP only allows fonts from 'self' and
+ * the app never contacts a third party, so type uses the system stacks.
+ */
+
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --color-ground: #0b0d10;
+  --color-panel: #111418;
+  --color-raised: #161a1f;
+  --color-control: #1c2127;
+  --color-hover: #252b32;
+  --color-line: #22282e;
+  --color-line-strong: #30373f;
+
+  --color-fg: #e6e8eb;
+  --color-fg-muted: #a3abb3;
+  --color-fg-faint: #7a838c;
+
+  --color-neutral: #b6bec6;
+  --color-act: #5c9dff;
+  --color-danger: #ff6369;
+  --color-ok: #3fcf8e;
+  --color-blocked: #ff8b3d;
+  --color-pending: #f2b441;
+  --color-muted: #8d969e;
+
+  --animate-rise: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-breathe: breathe 1.6s ease-in-out infinite;
+  --animate-appear-late: appear 240ms ease-out 400ms both;
+  --animate-ping-slow: ping-slow 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  @keyframes appear {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes ping-slow {
+    70%,
+    100% {
+      transform: scale(2.2);
+      opacity: 0;
+    }
+  }
+}
+
+/* Layout chrome. The mobile tab bar is fixed, so bottom padding clears it and the safe area. */
+@utility px-page {
+  padding-left: max(1rem, env(safe-area-inset-left, 0px));
+  padding-right: max(1rem, env(safe-area-inset-right, 0px));
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@utility pb-page {
+  padding-bottom: calc(var(--bottom-chrome) + 2.5rem);
+}
+
+@utility pb-command {
+  padding-bottom: calc(var(--bottom-chrome) + var(--commandbar-height) + 2rem);
+}
+
+@utility bottom-chrome {
+  bottom: var(--bottom-chrome);
+}
+
+@utility h-tabbar {
+  height: var(--tabbar-height);
+}
+
+@layer base {
+  :root {
+    --tabbar-height: 3.75rem;
+    --commandbar-height: 4.75rem;
+    --bottom-chrome: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px));
+    color-scheme: dark;
+  }
+
+  @media (width >= 64rem) {
+    :root {
+      --bottom-chrome: 0px;
+    }
+  }
+
+  html {
+    background-color: var(--color-ground);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* A modal detail sheet is open: the page behind it stays put. */
+  html:has(dialog[open]) {
+    overflow: hidden;
+  }
+
+  body {
+    min-height: 100dvh;
+    background-color: var(--color-ground);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Long commands and scripts scroll inside their own containers, never the page. */
+    overflow-x: clip;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-act) 38%, transparent);
+    color: var(--color-fg);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-act);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  button:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+
+  a,
+  button,
+  summary,
+  input {
+    touch-action: manipulation;
+  }
+
+  dialog::backdrop {
+    background-color: rgb(0 0 0 / 0.6);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 1ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .skip-link {
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 60;
+    transform: translateY(-300%);
+    border-radius: 0.5rem;
+    background-color: var(--color-fg);
+    padding: 0.625rem 0.875rem;
+    color: var(--color-ground);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .skip-link:focus {
+    transform: none;
+  }
+
+  .wordmark {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+
+  /* Small monospace section labels. */
+  .legend {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-fg-faint);
+  }
+
+  /* A command's steps on a vertical rail (ProgressTrace). */
+  .trace {
+    display: grid;
+    gap: 0.625rem;
+    min-width: 0;
+  }
+
+  .trace-step {
+    position: relative;
+    min-width: 0;
+    padding-left: 1.375rem;
+  }
+
+  .trace-step::before {
+    content: "";
+    position: absolute;
+    top: 1.125rem;
+    bottom: -0.5rem;
+    left: 4px;
+    width: 1px;
+    background-color: var(--color-line-strong);
+  }
+
+  .trace-step:last-child::before {
+    display: none;
+  }
+
+  .trace-dot {
+    position: absolute;
+    top: 5.5px;
+    left: 0;
+    width: 9px;
+    height: 9px;
+    border-radius: 9999px;
+  }
+
+  /* The off-screen textarea the clipboard fallback selects. 16px keeps iOS from zooming. */
+  .clipboard-buffer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+    font-size: 16px;
+  }
+}

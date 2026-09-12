@@ -6,13 +6,16 @@ on:
 
 jobs:
   offline:
+    name: Offline evals and frontend
     # The offline suite needs no API key and never drives the GUI, but the
     # backend imports macOS-only automation libraries, so run on macOS.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -20,8 +23,40 @@ jobs:
             backend/requirements.txt
             evals/requirements.txt
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r evals/requirements.txt
 
       - name: Offline evals and mutation check
         run: python evals/runner.py --no-write
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Frontend unit tests
+        run: npm test
+        working-directory: frontend
+
+      - name: Build frontend static export
+        run: npm run build
+        working-directory: frontend
+
+      # Serves frontend/out through the backend in-process and checks every
+      # page's security headers and CSP script hashes.
+      - name: Check the exported frontend as the backend serves it
+        run: python evals/check_frontend_export.py

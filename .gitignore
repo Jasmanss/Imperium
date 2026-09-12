@@ -37,8 +37,18 @@ htmlcov/
 .ruff_cache/
 .tox/
 
-# Frontend / Node (if added later)
+# Frontend / Node
 node_modules/
+frontend/node_modules/
+# Next.js build cache and the static export the backend serves at /app
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
+coverage/
+npm-debug.log*
+yarn-error.log*
 
 # Cursor
 .cursorignore

@@ -117,25 +117,61 @@ def is_confirmed() -> bool:
     return _confirmed.get()
 
 
-def create_pending(command: str, category: str) -> str:
-    """Park a command awaiting user confirmation; returns its id."""
+def create_pending(
+    command: str,
+    category: str,
+    tier: str = "",
+    command_id: str | None = None,
+    client_id: str | None = None,
+    details: list[dict] | None = None,
+    action: str = "",
+) -> tuple[str, dict]:
+    """Park a command awaiting user confirmation; returns its id and entry."""
     _prune()
     pending_id = uuid.uuid4().hex[:12]
-    _pending[pending_id] = {
+    entry = {
         "command": command,
         "category": category,
+        "tier": tier,
+        "command_id": command_id,
+        "client_id": client_id,
+        "details": details or [],
+        "action": action,
         "created_at": time.time(),
     }
-    return pending_id
+    _pending[pending_id] = entry
+    return pending_id, entry
 
 
 def pop_pending(pending_id: str) -> dict | None:
-    """Claim a pending command (single use); None if unknown or expired."""
+    """Claim a pending command (single use); None if unknown or expired.
+
+    Confirming and cancelling both claim through here, so an id that one of
+    them has claimed is gone for the other.
+    """
     _prune()
     return _pending.pop(pending_id, None)
 
 
+def cancel_pending(pending_id: str) -> dict | None:
+    """Revoke a parked command so it can never be confirmed; None if unknown or expired."""
+    return pop_pending(pending_id)
+
+
+def list_pending() -> list[tuple[str, dict]]:
+    """Unexpired parked commands as (id, entry), oldest first."""
+    _prune()
+    return sorted(list(_pending.items()), key=lambda item: item[1]["created_at"])
+
+
+def expires_at(entry: dict) -> float:
+    return entry["created_at"] + PENDING_TTL_SECONDS
+
+
 def _prune() -> None:
-    cutoff = time.time() - PENDING_TTL_SECONDS
-    for key in [k for k, v in _pending.items() if v["created_at"] < cutoff]:
-        del _pending[key]
+    now = time.time()
+    # list() copies the items in one step, so a concurrent claim cannot change
+    # the dict mid-iteration.
+    for key, entry in list(_pending.items()):
+        if expires_at(entry) <= now:
+            _pending.pop(key, None)
