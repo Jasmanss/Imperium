@@ -1,13 +1,13 @@
 # Eval Results
 
-_Generated 2026-09-11 20:00 on commit `3b31a44` by `python3 evals/runner.py`. Do not edit by hand._
+_Generated 2026-09-11 20:48 on commit `0dd945d` by `python3 evals/runner.py`. Do not edit by hand._
 
 ## Summary
 
 | Suite | Measures | Result |
 |---|---|---|
-| Offline | Safety and reliability layers (regression suite, must stay at 100%) | **173/173 passed** |
-| Mutation check | Deliberately broken safety properties the offline suite detects | **47/47 caught** |
+| Offline | Safety and reliability layers (regression suite, must stay at 100%) | **179/179 passed** |
+| Mutation check | Deliberately broken safety properties the offline suite detects | **54/54 caught** |
 | Live | End-to-end task success on a real Mac | Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set) |
 
 ## Offline suite by category
@@ -25,6 +25,7 @@ _Generated 2026-09-11 20:00 on commit `3b31a44` by `python3 evals/runner.py`. Do
 | permission_gate | 6/6 |
 | policy_gate | 57/57 |
 | repair_loop | 11/11 |
+| robustness | 6/6 |
 | tracing | 7/7 |
 | validator | 6/6 |
 
@@ -34,9 +35,9 @@ Each row deliberately breaks one safety property in memory, then reruns the offl
 
 | Mutation | Caught | Detected by |
 |---|---|---|
-| Auth middleware treats every path as public | yes | `auth_rejects_missing_token`, `auth_rejects_wrong_token`, `auth_rejects_truncated_token` +17 more |
-| Token comparison accepts any token | yes | `auth_rejects_wrong_token`, `auth_rejects_truncated_token`, `auth_rejects_extended_token` +3 more |
-| Destructive actions skip confirmation | yes | `gate_parks_imessage`, `gate_parks_email`, `gate_parks_git_push` +18 more |
+| Auth middleware treats every path as public | yes | `auth_rejects_missing_token`, `auth_rejects_wrong_token`, `auth_rejects_truncated_token` +18 more |
+| Token comparison accepts any token | yes | `auth_rejects_wrong_token`, `auth_rejects_truncated_token`, `auth_rejects_extended_token` +4 more |
+| Destructive actions skip confirmation | yes | `gate_parks_imessage`, `gate_parks_email`, `gate_parks_git_push` +20 more |
 | Pending confirmations are replayable | yes | `confirm_id_is_single_use`, `confirm_cancel_revokes_the_pending_id` |
 | Pending confirmations never expire | yes | `confirm_id_expires_after_ttl`, `confirm_unknown_or_expired_ids_change_nothing`, `confirm_pending_list_never_shows_expired` |
 | Policy gate allows every script | yes | `gate_blocks_send_when_classifier_misses_it`, `policy_blocks_shell_escape`, `policy_blocks_shell_escape_any_case` +42 more |
@@ -53,14 +54,14 @@ Each row deliberately breaks one safety property in memory, then reruns the offl
 | Timed-out or confirmed commands are re-run | yes | `repair_not_rerun_after_timeout`, `repair_not_rerun_after_execution_error_in_confirmed_command` |
 | Executed scripts not recorded | yes | `events_stream_hello_first_then_command_lifecycle`, `worker_keeps_confirmed_context_and_trace`, `trace_records_executed_script` |
 | Latency percentile uses a rounded index | yes | `stats_percentile_is_nearest_rank` |
-| Email commands not recognised | yes | `gate_parks_email`, `confirm_ids_are_independent`, `confirm_details_never_look_anything_up` +6 more |
+| Email commands not recognised | yes | `gate_parks_email`, `confirm_ids_are_independent`, `confirm_details_never_look_anything_up` +7 more |
 | Repair loop disabled | yes | `repair_fixes_runtime_error`, `repair_fixes_validation_error`, `repair_is_bounded` +6 more |
 | Token usage not recorded | yes | `events_stream_hello_first_then_command_lifecycle`, `worker_keeps_confirmed_context_and_trace`, `trace_records_clean_command` +3 more |
-| Audit schema migration skipped | yes | `gate_parks_imessage`, `gate_blocks_send_when_classifier_misses_it`, `confirm_parked_response_describes_the_command` +15 more |
+| Audit schema migration skipped | yes | `gate_parks_imessage`, `gate_blocks_send_when_classifier_misses_it`, `confirm_parked_response_describes_the_command` +16 more |
 | command_id and action only added to new audit databases | yes | `audit_migrates_legacy_database`, `audit_migrates_v2_database_to_command_ids` |
 | Audit filters ignored | yes | `audit_migrates_v2_database_to_command_ids`, `audit_pages_and_filters` |
-| Last full audit page points past the end | yes | `audit_pages_and_filters` |
-| API responses cacheable | yes | `auth_api_responses_are_not_cacheable`, `auth_rejections_are_not_cacheable` |
+| Last full audit page points past the end | yes | `robust_audit_failure_never_breaks_the_command`, `audit_pages_and_filters` |
+| API responses cacheable | yes | `auth_api_responses_are_not_cacheable`, `auth_rejections_are_not_cacheable`, `robust_non_ascii_authorization_header_is_401` |
 | Event stream is public | yes | `auth_protects_event_stream` |
 | Cancel does not revoke the pending id | yes | `confirm_cancel_revokes_the_pending_id` |
 | GET /pending lists expired entries | yes | `confirm_pending_list_never_shows_expired` |
@@ -76,8 +77,15 @@ Each row deliberately breaks one safety property in memory, then reruns the offl
 | Subscriber queue outgrows the replay buffer | yes | `events_overflowing_subscriber_dropped_and_recoverable` |
 | Hello frame carries the pairing URL | yes | `events_stream_hello_first_then_command_lifecycle`, `events_stream_replays_after_last_event_id`, `events_stream_slots_capped_and_released` +1 more |
 | CSP allows inline scripts | yes | `frontend_csp_hashes_match_export_scripts`, `frontend_fallback_page_when_export_missing` |
-| Framing allowed (frame-ancestors and X-Frame-Options dropped) | yes | `frontend_csp_hashes_match_export_scripts`, `frontend_fallback_page_when_export_missing` |
+| Framing allowed (frame-ancestors and X-Frame-Options dropped) | yes | `frontend_csp_hashes_match_export_scripts`, `frontend_fallback_page_when_export_missing`, `robust_nul_byte_in_app_path_is_a_secured_404` |
 | CSP hashes scripts a browser never runs | yes | `frontend_csp_hashes_match_export_scripts` |
+| Script type and language not stripped before comparison | yes | `frontend_csp_hashes_match_export_scripts` |
+| A path the filesystem cannot express escapes the export host | yes | `robust_nul_byte_in_app_path_is_a_secured_404` |
+| Commands are not repaired to encodable text | yes | `robust_unencodable_command_is_repaired_at_the_door` |
+| Confirmation details parse the whole command | yes | `robust_huge_command_does_not_stall_the_server` |
+| A send hides a recipient the parser could not read | yes | `confirm_details_never_look_anything_up` |
+| Audit failures other than sqlite3's break the command | yes | `robust_audit_failure_never_breaks_the_command` |
+| Pairing token compared as text, not bytes | yes | `robust_non_ascii_authorization_header_is_401` |
 | Comments do not hide scripts from the CSP tokenizer | yes | `frontend_csp_hashes_match_export_scripts` |
 | Newlines not normalized before hashing | yes | `frontend_csp_hashes_match_export_scripts` |
 | Script text ends at the first </script> | yes | `frontend_csp_hashes_match_export_scripts` |
@@ -225,8 +233,14 @@ Not run: not requested (run with --live on a Mac with ANTHROPIC_API_KEY set). 11
 | `worker_runs_commands_one_at_a_time` | offline | command_worker | pass | two commands, one at a time on ['imperium-command_0'] |
 | `worker_keeps_server_responsive_while_a_command_runs` | offline | command_worker | pass | the server answered while a command ran |
 | `worker_keeps_confirmed_context_and_trace` | offline | command_worker | pass | confirmation and trace carried onto the worker |
-| `frontend_csp_hashes_match_export_scripts` | offline | frontend_host | pass | 5 running inline scripts hashed |
+| `frontend_csp_hashes_match_export_scripts` | offline | frontend_host | pass | 8 running inline scripts hashed |
 | `frontend_fallback_page_when_export_missing` | offline | frontend_host | pass | fallback served under the same headers |
+| `robust_unencodable_command_is_repaired_at_the_door` | offline | robustness | pass | the command was repaired at the door |
+| `robust_huge_command_does_not_stall_the_server` | offline | robustness | pass | parked in 15 ms, details [3, 1973] |
+| `robust_audit_failure_never_breaks_the_command` | offline | robustness | pass | the command, its events, and the read routes survived |
+| `robust_non_ascii_authorization_header_is_401` | offline | robustness | pass | 3 malformed Authorization values answered 401 |
+| `robust_nul_byte_in_app_path_is_a_secured_404` | offline | robustness | pass | 2 unrepresentable paths answered a secured 404 |
+| `robust_websocket_to_the_frontend_is_refused` | offline | robustness | pass | 3 websocket handshakes refused |
 | `trace_records_clean_command` | offline | tracing | pass | tokens 1200/80, repairs 0 |
 | `trace_sums_tokens_across_repair` | offline | tracing | pass | tokens 1400/100, repairs 1 |
 | `trace_records_failed_command` | offline | tracing | pass | tokens 1500/110, repairs 2 |
