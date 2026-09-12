@@ -2012,14 +2012,35 @@ def _classify_command(command: str) -> str:
 
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
+# How much of a command the confirmation preview parses and shows. Longer than
+# any command a person dictates, short enough that the parsers stay quick.
+DETAILS_PREVIEW_CHARS = 2000
+
 
 def _client_id(value) -> str | None:
     """The frontend's own id for a request, or None when absent or malformed."""
     return value if isinstance(value, str) and _CLIENT_ID.fullmatch(value) else None
 
 
+def _encodable(text: str) -> str:
+    """The text with anything UTF-8 cannot encode replaced.
+
+    JSON allows a lone surrogate escape (`\\ud83d`, what a client slicing a
+    string mid-emoji produces), and `json.loads` returns it as a str that cannot
+    be encoded. Such a command would break the sqlite3 audit write and every
+    JSON response that echoes it back, so it is repaired at the door.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def _new_command_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+# A send whose recipient the parser could not read still shows a "To" row: the
+# confirm card must never let someone approve a send without naming its target.
+# The handler refuses such a command, so nothing is sent either way.
+UNREADABLE_RECIPIENT = "Not recognised — nothing will be sent"
 
 
 def _pending_details(category: str, command: str) -> list[dict]:
@@ -2029,16 +2050,22 @@ def _pending_details(category: str, command: str) -> list[dict]:
     in Contacts, reads the disk, or runs a process, so nothing happens before
     Confirm.
     """
+    # Details are a preview, and the handlers' parsers are not linear in the
+    # length of what they scan (the email recipient regex backtracks over text
+    # with no "@"). This runs on the event loop, before the command reaches the
+    # worker, so it must never scan an unbounded command: a 40 KB one would
+    # freeze the event stream, GET /pending, and cancel for seconds.
+    command = command[:DETAILS_PREVIEW_CHARS]
     if category == "message_send":
         parsed = _parse_text_message(command)
         recipient = parsed["recipient"]
         if recipient and not parsed["is_phone"]:
             recipient = f"{recipient} (looked up in Contacts when you confirm)"
-        rows = [("To", recipient), ("Message", parsed["message"])]
+        rows = [("To", recipient or UNREADABLE_RECIPIENT), ("Message", parsed["message"])]
     elif category == "email_send":
         parsed = _extract_email_content(command)
         rows = [
-            ("To", parsed["recipient"]),
+            ("To", parsed["recipient"] or UNREADABLE_RECIPIENT),
             ("Subject", parsed["subject"]),
             ("Message", parsed["body"]),
             ("Attachment", parsed["attachment_file"]),
@@ -2087,6 +2114,8 @@ async def text_command(data: dict):
     command = data.get("command", "")
     if not isinstance(command, str) or not command.strip():
         return {"error": "No command provided"}
+    # The handlers read the command out of `data` again, so repair it there too.
+    command = data["command"] = _encodable(command)
 
     command_id = _new_command_id()
     client_id = _client_id(data.get("client_id"))

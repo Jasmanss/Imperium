@@ -12,6 +12,8 @@ It checks, for the real build:
   * every exported HTML page is served, with the right status and content type,
     and the bytes on disk;
   * a few _next/static assets are served, immutable and with the right type;
+  * every /app URL a page loads itself resolves, so a basePath change or a
+    half-finished build cannot ship an export that renders blank;
   * a path that does not exist answers 404 with the export's own 404 page;
   * every response carries the security headers, and each page's CSP lists the
     sha256 hash of exactly the inline scripts a browser would run in it, with no
@@ -30,7 +32,9 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import html
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -420,6 +424,46 @@ def check_headers(report, label, response, cache_control):
     return csp
 
 
+_REFERENCE = re.compile(r"""\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""", re.IGNORECASE)
+
+
+def referenced_urls(document):
+    """The distinct /app URLs a page loads itself, in the order they appear."""
+    urls = []
+    for match in _REFERENCE.finditer(document):
+        value = next(group for group in match.groups() if group is not None)
+        value = html.unescape(value).split("#", 1)[0]
+        if value.startswith("/app/") and value not in urls:
+            urls.append(value)
+    return urls
+
+
+def check_references(report, client, url, document, seen):
+    """Every asset the page names is actually served under /app.
+
+    The pages are checked as bytes and headers everywhere else, which says
+    nothing about whether the browser can load what they point at: drop
+    `basePath: "/app"` from next.config.ts, or ship a truncated out/, and every
+    page still passes while rendering blank. Each distinct URL is fetched once.
+    """
+    references = referenced_urls(document)
+    report.expect(
+        bool(references),
+        "GET %s: the page references no /app asset — a page that loads nothing renders nothing" % url,
+    )
+    for reference in references:
+        if reference in seen:
+            continue
+        seen[reference] = client.get(reference).status_code
+    missing = [(reference, seen[reference]) for reference in references if seen[reference] != 200]
+    report.expect(
+        not missing,
+        "GET %s: %d of the %d assets it loads are not served (%s)"
+        % (url, len(missing), len(references), ", ".join("%s -> HTTP %d" % pair for pair in missing)),
+    )
+    return len(references)
+
+
 def check_page(report, client, url, path):
     # Every exported page exists, so asking for it answers 200 — including
     # 404.html, which is a real file. A path that does not exist is what gets
@@ -544,6 +588,7 @@ def main_cli():
     report.expect(bool(assets), "the export contains no _next/static assets to check")
 
     hashed = 0
+    referenced = {}
     with isolated_backend(EXPORT):
         client = TestClient(main.app, raise_server_exceptions=False, follow_redirects=False)
         redirect = client.get("/app")
@@ -554,6 +599,7 @@ def main_cli():
         )
         for url, path in pages:
             hashed += check_page(report, client, url, path) or 0
+            check_references(report, client, url, path.read_text(encoding="utf-8"), referenced)
         for url, path in assets:
             check_asset(report, client, url, path)
         check_missing_page(report, client, EXPORT)
@@ -562,6 +608,7 @@ def main_cli():
     print("Export:       %s" % EXPORT)
     print("Pages:        %d checked, %d inline scripts hashed into their CSP" % (len(pages), hashed))
     print("Assets:       %d checked under _next/static" % len(assets))
+    print("References:   %d distinct /app URLs the pages load, all resolved" % len(referenced))
     print("API routes:   %d checked for 401 without a pairing token" % len(API_ROUTES))
     print("Checks:       %d" % report.checks)
     if report.failures:

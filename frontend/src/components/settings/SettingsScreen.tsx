@@ -12,7 +12,7 @@ import { AlertIcon, RetryIcon } from "../icons";
 import { PageBody, PageHeader } from "../PageHeader";
 import { useAuth } from "../providers/AuthProvider";
 import { useEventStream, useStreamState } from "../providers/EventStreamProvider";
-import { STREAM_STATUS } from "../StreamStatus";
+import { STREAM_STATUS, streamDescription } from "../StreamStatus";
 import { button, TONE } from "../ui";
 
 export function SettingsScreen() {
@@ -161,7 +161,7 @@ function StreamPanel() {
         <Row label="Status">
           <span className="flex flex-col gap-0.5">
             <StatusText tone={view.tone}>{view.label}</StatusText>
-            <span className="text-[13px] leading-5 text-fg-muted">{view.description}</span>
+            <span className="text-[13px] leading-5 text-fg-muted">{streamDescription(state)}</span>
           </span>
         </Row>
         <Row label="Connected at">

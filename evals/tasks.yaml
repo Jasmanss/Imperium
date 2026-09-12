@@ -414,6 +414,12 @@ tasks:
         expect_details:
           - {label: To, value: John (looked up in Contacts when you confirm)}
           - {label: Message, value: hi}
+      # A recipient the parser cannot read still gets a To row, so the card
+      # never hides who a send is aimed at.
+      - command: text 555-0100 saying on my way
+        expect_details:
+          - {label: To, value: "Not recognised — nothing will be sent"}
+          - {label: Message, value: on my way}
       - command: send an email to john@example.com saying the meeting moved to 3pm
         expect_details:
           - {label: To, value: john@example.com}
@@ -1219,6 +1225,66 @@ tasks:
       base-uri: "'none'"
       frame-ancestors: "'none'"
     cache: {html: no-cache, hashed_asset: "public, max-age=31536000, immutable"}
+
+  # --- Malformed input answers the contract, never a 500 ---------------------
+
+  - id: robust_unencodable_command_is_repaired_at_the_door
+    suite: offline
+    category: robustness
+    type: robustness
+    scenario: unencodable_command
+    healthy_command: text 5551234567 saying on my way
+    # Legal JSON, but a lone surrogate: what a client slicing a string mid-emoji sends.
+    raw_body: '{"command": "text 5551234567 saying \ud83d"}'
+
+  - id: robust_huge_command_does_not_stall_the_server
+    suite: offline
+    category: robustness
+    type: robustness
+    scenario: oversized_command
+    prefix: "send an email to bob about "
+    filler: a
+    filler_chars: 40000
+    suffix: " saying hello there friend"
+    max_seconds: 0.5
+
+  - id: robust_audit_failure_never_breaks_the_command
+    suite: offline
+    category: robustness
+    type: robustness
+    scenario: audit_unavailable
+    command: open notes
+
+  - id: robust_non_ascii_authorization_header_is_401
+    suite: offline
+    category: robustness
+    type: raw_request
+    scenario: non_ascii_auth_header
+    method: GET
+    path: /audit
+    headers: ["Bearer caf\xe9", "Bearer \x80", "caf\xe9"]
+    expect_headers:
+      Cache-Control: no-store
+      X-Content-Type-Options: nosniff
+
+  - id: robust_nul_byte_in_app_path_is_a_secured_404
+    suite: offline
+    category: robustness
+    type: raw_request
+    scenario: unrepresentable_path
+    # uvicorn percent-decodes the target, so GET /app/%00 arrives like this.
+    paths: ["/app/\0", "/app/a\0b"]
+    expect_headers:
+      X-Frame-Options: DENY
+      X-Content-Type-Options: nosniff
+      Cache-Control: no-cache
+
+  - id: robust_websocket_to_the_frontend_is_refused
+    suite: offline
+    category: robustness
+    type: raw_request
+    scenario: websocket_refused
+    paths: ["/app/socket", "/app/", "/app/_next/static/chunks/main.js"]
 
   # --- Tracing ---------------------------------------------------------------
 

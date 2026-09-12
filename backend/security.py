@@ -46,6 +46,19 @@ def get_token() -> str:
     return _token_cache
 
 
+def _token_matches(supplied: str) -> bool:
+    """Constant-time comparison of a header value against the pairing token.
+
+    Compared as bytes, not text: Starlette decodes header values as latin-1, so a
+    single byte >= 0x80 gives a non-ASCII str, which `hmac.compare_digest` refuses
+    with a TypeError. A malformed header is a wrong token, never a crash.
+    """
+    return hmac.compare_digest(
+        supplied.encode("utf-8", "surrogateescape"),
+        get_token().encode("utf-8", "surrogateescape"),
+    )
+
+
 def _is_public(path: str) -> bool:
     return (
         path in _PUBLIC_EXACT
@@ -60,7 +73,7 @@ async def auth_middleware(request, call_next):
         return await call_next(request)
     header = request.headers.get("authorization", "")
     supplied = header[7:] if header.lower().startswith("bearer ") else ""
-    if not supplied or not hmac.compare_digest(supplied, get_token()):
+    if not supplied or not _token_matches(supplied):
         response = JSONResponse(
             {
                 "error": "Unauthorized — this device is not paired. "

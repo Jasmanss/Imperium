@@ -13,8 +13,14 @@ export const STREAM_STATUS: Record<StreamStatus, { label: string; tone: Tone; de
   live: { label: "Live", tone: "ok", description: "Receiving events from the Mac as they happen." },
   reconnecting: { label: "Reconnecting", tone: "pending", description: "The connection to the Mac dropped." },
   offline: { label: "Offline", tone: "danger", description: "Can’t reach the Mac. Still retrying." },
+  busy: { label: "Busy", tone: "pending", description: "The Mac is carrying too many event streams. Still retrying." },
   unauthorized: { label: "Not paired", tone: "danger", description: "The Mac rejected this device’s pairing." },
 };
+
+/** What to tell the user: the Mac's own explanation when it gave one. */
+export function streamDescription(state: { status: StreamStatus; rejection: string | null }): string {
+  return state.rejection ?? STREAM_STATUS[state.status].description;
+}
 
 export function StreamStatusPill({ className }: { className?: string }) {
   const { status } = useStreamState();
@@ -47,7 +53,7 @@ export function StreamNotice({ className }: { className?: string }) {
   const state = useStreamState();
   const waiting = state.retryAt !== null;
   const now = useNow(0, 1000, waiting);
-  if (state.status !== "reconnecting" && state.status !== "offline") return null;
+  if (state.status !== "reconnecting" && state.status !== "offline" && state.status !== "busy") return null;
 
   const view = STREAM_STATUS[state.status];
   const seconds = waiting && now > 0 && state.retryAt !== null ? Math.max(0, Math.ceil((state.retryAt - now) / 1000)) : null;
@@ -61,7 +67,7 @@ export function StreamNotice({ className }: { className?: string }) {
       )}
     >
       <p className={cx("text-[14px] leading-5", TONE[view.tone].text)}>
-        {view.description}
+        {streamDescription(state)}
         {seconds !== null && ` Next attempt in ${seconds} s.`}
       </p>
       <button type="button" onClick={() => client.reconnect()} className={button("secondary", "sm")}>

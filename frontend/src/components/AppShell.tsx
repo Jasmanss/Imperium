@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ComponentType, ReactNode } from "react";
+import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useLocationOrigin } from "@/hooks/useLocationOrigin";
 import { cx } from "@/lib/cx";
 import { ActivityIcon, BarsIcon, ImperiumMark, LedgerIcon, PromptIcon, SlidersIcon } from "./icons";
@@ -34,6 +35,7 @@ export function isActivePath(pathname: string, href: string): boolean {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? "/";
   const origin = useLocationOrigin();
+  useKeyboardInset();
 
   return (
     <div className="min-h-dvh lg:pl-60">
@@ -91,7 +93,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
 
       <nav aria-label="Primary" className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-panel/95 pb-safe backdrop-blur-md lg:hidden">
-        <ul className="grid h-tabbar grid-cols-5 px-[env(safe-area-inset-left)]">
+        <ul className="grid h-tabbar grid-cols-5 pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
           {NAV_ITEMS.map((item) => {
             const active = isActivePath(pathname, item.href);
             return (

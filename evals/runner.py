@@ -1775,6 +1775,11 @@ EXPORT_INDEX = [
     ('<script data-note="a > b" type=" text/javascript ">', "window.__ATTRIBUTE_WITH_GT__=1", True),
     ("<script>", '\n<!--\ndocument.write("<script>window.__NESTED__=1</script>");\n-->\n', True),
     ('<script type="text/plain">', "window.__PLAIN_TEXT__=1", False),
+    # The spec strips the type before comparing it, so an empty or whitespace-only
+    # one is the empty string, which runs — and a padded language still names one.
+    ('<script type="">', "window.__EMPTY_TYPE__=1", True),
+    ('<script type="  \t ">', "window.__BLANK_TYPE__=1", True),
+    ('<script language=" javascript ">', "window.__PADDED_LANGUAGE__=1", True),
     ('<script language="vbscript">', "MsgBox 1", False),
     "<textarea><script>window.__IN_TEXTAREA__=1</script></textarea>\r\n",
     "<noscript><script>window.__IN_NOSCRIPT__=1</script></noscript>\r\n",
@@ -1917,6 +1922,181 @@ def run_token_storage(task: dict) -> tuple[bool, str]:
     return c.outcome(f"mode {oct(file_mode)}, {len(token)} chars, persistent")
 
 
+def _recorded(command: str) -> dict:
+    return {"transcript": command, "action": "recorded", "osascript_ok": True}
+
+
+def _encodes(text: str) -> bool:
+    """Whether the text survives the UTF-8 encode every JSON response and the audit write do."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def run_robustness(task: dict) -> tuple[bool, str]:
+    """Malformed or hostile input answers the contract instead of raising a 500."""
+    c = Checks()
+    headers = auth_headers("valid")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    scenario = task["scenario"]
+
+    async def handler(data, command):
+        return _recorded(command)
+
+    if scenario == "unencodable_command":
+        # A lone surrogate is legal JSON but cannot be encoded to UTF-8: it must
+        # never reach the audit write, the parked entry, or a JSON response.
+        healthy = client.post("/text-command", headers=headers, json={"command": task["healthy_command"]})
+        c.expect(healthy.status_code == 200, f"the healthy command returned HTTP {healthy.status_code}")
+        response = client.post(
+            "/text-command",
+            headers=dict(headers, **{"Content-Type": "application/json"}),
+            content=task["raw_body"].encode("utf-8"),
+        )
+        c.expect(response.status_code == 200, f"the malformed command returned HTTP {response.status_code}")
+        body = _json_or_none(response) or {}
+        c.expect(body.get("requires_confirmation") is True, f"the command was not parked: {body}")
+        command = str(body.get("command", ""))
+        c.expect(_encodes(command), f"the parked command still cannot be encoded: {command!r}")
+        c.expect(
+            all(_encodes(str(row.get("value", ""))) for row in body.get("details") or []),
+            f"a detail row still cannot be encoded: {body.get('details')}",
+        )
+        listing = client.get("/pending", headers=headers)
+        c.expect(listing.status_code == 200, f"GET /pending afterwards returned HTTP {listing.status_code}")
+        listed = [entry.get("pending_id") for entry in (_json_or_none(listing) or {}).get("pending", [])]
+        c.expect(len(listed) == 2, f"GET /pending listed {listed}, expected both parked commands")
+        page = client.get("/audit", headers=headers)
+        c.expect(page.status_code == 200, f"GET /audit afterwards returned HTTP {page.status_code}")
+        decisions = [entry["decision"] for entry in (_json_or_none(page) or {}).get("entries", [])]
+        c.expect(decisions.count("pending_confirmation") == 2, f"audit recorded {decisions}")
+        return c.outcome("the command was repaired at the door")
+
+    if scenario == "oversized_command":
+        # _pending_details runs on the event loop, and the handlers' parsers are
+        # not linear in what they scan: a huge command must not stall the server.
+        command = task["prefix"] + task["filler"] * task["filler_chars"] + task["suffix"]
+        began = time.monotonic()
+        response = client.post("/text-command", headers=headers, json={"command": command})
+        elapsed = time.monotonic() - began
+        c.expect(response.status_code == 200, f"HTTP {response.status_code}")
+        body = _json_or_none(response) or {}
+        c.expect(body.get("requires_confirmation") is True, f"the command was not parked: {sorted(body)}")
+        sizes = [len(str(row.get("value", ""))) for row in body.get("details") or []]
+        c.expect(
+            sizes and max(sizes) <= main.DETAILS_PREVIEW_CHARS,
+            f"detail values are {sizes} characters, expected at most {main.DETAILS_PREVIEW_CHARS}",
+        )
+        c.expect(elapsed < task["max_seconds"], f"parking took {elapsed:.2f}s, expected under {task['max_seconds']}s")
+        return c.outcome(f"parked in {elapsed * 1000:.0f} ms, details {sizes}")
+
+    if scenario == "audit_unavailable":
+        # audit.py's contract: a write that cannot happen never breaks the action.
+        def unavailable(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        with patched((audit, "_connect", unavailable), (main, "_run_text_command", handler)):
+            response = client.post("/text-command", headers=headers, json={"command": task["command"]})
+            c.expect(response.status_code == 200, f"POST /text-command returned HTTP {response.status_code}")
+            body = _json_or_none(response) or {}
+            c.expect(body.get("ok") is True, f"the command did not succeed: {body}")
+            c.expect("audit_id" in body and body["audit_id"] is None, f"audit_id is {body.get('audit_id')!r}")
+            kinds = [event["type"] for event in _published(command_id=body.get("command_id"))]
+            c.expect(kinds[-1:] == ["finished"], f"the command's events were {kinds}, expected to end in finished")
+            stats = client.get("/stats", headers=headers)
+            c.expect(stats.status_code == 200, f"GET /stats returned HTTP {stats.status_code}")
+            c.expect((_json_or_none(stats) or {}).get("commands") == 0, "GET /stats did not fall back to an empty log")
+            page = client.get("/audit", headers=headers)
+            c.expect(page.status_code == 200, f"GET /audit returned HTTP {page.status_code}")
+            c.expect((_json_or_none(page) or {}) == {"entries": [], "next_before_id": None}, "GET /audit did not fall back")
+        return c.outcome("the command, its events, and the read routes survived")
+
+    return False, f"unknown robustness scenario {scenario!r}"
+
+
+def run_raw_request(task: dict) -> tuple[bool, str]:
+    """Requests TestClient cannot express: raw header bytes, NUL paths, websockets."""
+    c = Checks()
+    scenario = task["scenario"]
+
+    if scenario == "non_ascii_auth_header":
+        # Header values decode as latin-1, so a byte >= 0x80 gives a non-ASCII
+        # str — which hmac.compare_digest refuses. That must still be a 401.
+        async def probe() -> str:
+            for value in task["headers"]:
+                call = AsgiCall(task["method"], task["path"], {"Authorization": value})
+                body = await call.json() or {}
+                label = f"Authorization: {value!r}"
+                c.expect(call.status == 401, f"{label}: HTTP {call.status}, expected 401")
+                c.expect("not paired" in str(body.get("error", "")).lower(), f"{label}: body {body}")
+                for name, expected in task["expect_headers"].items():
+                    c.expect(call.headers.get(name.lower()) == expected, f"{label}: {name} = {call.headers.get(name.lower())!r}")
+            return f"{len(task['headers'])} malformed Authorization values answered 401"
+
+        return c.outcome(_run_async(probe()))
+
+    if scenario == "unrepresentable_path":
+        # uvicorn percent-decodes the target, so GET /app/%00 arrives as a path
+        # os.stat cannot express. Starlette does not catch that, so the mount must.
+        _write_export_page(main.frontend.directory / "index.html", EXPORT_ACTIVITY)
+
+        async def probe() -> str:
+            for path in task["paths"]:
+                call = AsgiCall("GET", path)
+                await call.json()
+                label = f"GET {path!r}"
+                c.expect(call.status == 404, f"{label}: HTTP {call.status}, expected 404")
+                for name, expected in task["expect_headers"].items():
+                    c.expect(call.headers.get(name.lower()) == expected, f"{label}: {name} = {call.headers.get(name.lower())!r}")
+                c.expect(
+                    "frame-ancestors 'none'" in call.headers.get("content-security-policy", ""),
+                    f"{label}: CSP is {call.headers.get('content-security-policy')!r}",
+                )
+            return f"{len(task['paths'])} unrepresentable paths answered a secured 404"
+
+        return c.outcome(_run_async(probe()))
+
+    if scenario == "websocket_refused":
+        # Starlette routes websocket scopes to a mount too, and the HTTP auth
+        # middleware never sees them: the mount must close the handshake itself.
+        async def probe() -> str:
+            for path in task["paths"]:
+                sent: list[dict] = []
+
+                async def receive():
+                    return {"type": "websocket.connect"}
+
+                async def send(message):
+                    sent.append(message)
+
+                scope = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0", "spec_version": "2.3"},
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "query_string": b"",
+                    "root_path": "",
+                    "scheme": "ws",
+                    "headers": [(b"host", b"testserver")],
+                    "client": ("127.0.0.1", 50000),
+                    "server": ("testserver", 80),
+                    "subprotocols": [],
+                }
+                await _bounded(main.app(scope, receive, send), 2.0, f"the websocket to {path} did not finish")
+                kinds = [message["type"] for message in sent]
+                c.expect(
+                    kinds[:1] == ["websocket.close"],
+                    f"a websocket to {path} was answered with {kinds}, expected websocket.close",
+                )
+            return f"{len(task['paths'])} websocket handshakes refused"
+
+        return c.outcome(_run_async(probe()))
+
+    return False, f"unknown raw_request scenario {scenario!r}"
+
+
 # --- Live executor ----------------------------------------------------------
 
 OUTWARD_FACING = re.compile(
@@ -2023,6 +2203,8 @@ EXECUTORS = {
     "sse": run_sse,
     "worker": run_worker,
     "frontend_host": run_frontend_host,
+    "robustness": run_robustness,
+    "raw_request": run_raw_request,
     "token_storage": run_token_storage,
     "handler_injection": run_handler_injection,
     "live": run_live,
@@ -2156,6 +2338,34 @@ def _script_end_at_first_close(text: str, i: int) -> tuple[int, int]:
     return lt, frontend_host._after_tag(text, lt)
 
 
+def _executes_without_stripping(attributes: dict) -> bool:
+    """A scanner that tests the raw type and language, so padded values look unknown."""
+    if "src" in attributes:
+        return False
+    if "type" in attributes:
+        if attributes["type"] == "":
+            return True
+        type_string = attributes["type"].lower()
+    elif attributes.get("language"):
+        type_string = "text/" + attributes["language"].lower()
+    else:
+        return True
+    return type_string in ("module", "importmap", "speculationrules") or type_string in frontend_host._JAVASCRIPT_TYPES
+
+
+def _log_event_for_sqlite_errors_only(decision: str, **fields):
+    """An audit writer that only survives sqlite3's own errors, as the first one did."""
+    try:
+        return audit._insert(decision, **fields)
+    except sqlite3.Error:
+        return None
+
+
+def _token_matches_as_text(supplied: str) -> bool:
+    """Comparing header text instead of bytes, which raises on any non-ASCII value."""
+    return security.hmac.compare_digest(supplied, security.get_token())
+
+
 MUTATIONS = [
     ("Auth middleware treats every path as public", lambda: patched((security, "_is_public", lambda path: True))),
     ("Token comparison accepts any token", lambda: patched((security.hmac, "compare_digest", lambda a, b: True))),
@@ -2239,6 +2449,13 @@ MUTATIONS = [
         ),
     ),
     ("CSP hashes scripts a browser never runs", lambda: patched((frontend_host, "executes", lambda attributes: True))),
+    ("Script type and language not stripped before comparison", lambda: patched((frontend_host, "executes", _executes_without_stripping))),
+    ("A path the filesystem cannot express escapes the export host", lambda: patched((frontend_host, "_UNSERVABLE", ()))),
+    ("Commands are not repaired to encodable text", lambda: patched((main, "_encodable", lambda text: text))),
+    ("Confirmation details parse the whole command", lambda: patched((main, "DETAILS_PREVIEW_CHARS", 10**9))),
+    ("A send hides a recipient the parser could not read", lambda: patched((main, "UNREADABLE_RECIPIENT", ""))),
+    ("Audit failures other than sqlite3's break the command", lambda: patched((audit, "log_event", _log_event_for_sqlite_errors_only))),
+    ("Pairing token compared as text, not bytes", lambda: patched((security, "_token_matches", _token_matches_as_text))),
     ("Comments do not hide scripts from the CSP tokenizer", lambda: patched((frontend_host, "_comment_end", lambda text, i: i))),
     ("Newlines not normalized before hashing", lambda: patched((frontend_host, "_input_stream", lambda document: document))),
     ("Script text ends at the first </script>", lambda: patched((frontend_host, "_script_end", _script_end_at_first_close))),

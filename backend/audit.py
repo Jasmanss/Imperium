@@ -73,7 +73,7 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def log_event(
+def _insert(
     decision: str,
     command: str = "",
     category: str = "",
@@ -86,10 +86,10 @@ def log_event(
     command_id: str | None = None,
     action: str | None = None,
 ) -> int | None:
-    """Record one row; returns its id, or None if it could not be written."""
+    """Write one row and return its id. Raises if the database cannot take it."""
     t = trace or {}
+    conn = _connect()
     try:
-        conn = _connect()
         with conn:
             cursor = conn.execute(
                 "INSERT INTO audit (ts, command, category, tier, decision, script, error, ok, "
@@ -117,10 +117,23 @@ def log_event(
                 ),
             )
             row_id = cursor.lastrowid
+    finally:
         conn.close()
-        return row_id
-    except sqlite3.Error as e:
-        print(f"audit: failed to record event ({e})")
+    return row_id
+
+
+def log_event(decision: str, **fields) -> int | None:
+    """Record one row (fields as `_insert` takes them); its id, or None if unwritten.
+
+    Best-effort by contract, and deliberately not narrowed to `sqlite3.Error`: a
+    full disk (OSError), a value sqlite3 cannot bind (UnicodeEncodeError), or any
+    other failure must not take the command's response, its `finished` event, or
+    the command itself down with it.
+    """
+    try:
+        return _insert(decision, **fields)
+    except Exception as e:
+        print(f"audit: failed to record event ({type(e).__name__}: {e})")
         return None
 
 
@@ -191,8 +204,8 @@ def stats() -> dict:
             "cancelled": decisions.get("cancelled", 0),
             "by_category": by_category,
         }
-    except sqlite3.Error as e:
-        print(f"audit: failed to compute stats ({e})")
+    except Exception as e:
+        print(f"audit: failed to compute stats ({type(e).__name__}: {e})")
         # The shape of an empty log, so the phone never meets a missing field.
         return {
             "commands": 0,
@@ -251,8 +264,8 @@ def _query(
 def recent(limit: int = 50) -> list[dict]:
     try:
         return _query(limit)
-    except sqlite3.Error as e:
-        print(f"audit: failed to read log ({e})")
+    except Exception as e:
+        print(f"audit: failed to read log ({type(e).__name__}: {e})")
         return []
 
 
@@ -265,8 +278,8 @@ def page(
     """One page of `GET /audit`; next_before_id is None when no older rows match."""
     try:
         rows = _query(limit + 1, before_id, decision, command_id)
-    except sqlite3.Error as e:
-        print(f"audit: failed to read log ({e})")
+    except Exception as e:
+        print(f"audit: failed to read log ({type(e).__name__}: {e})")
         return {"entries": [], "next_before_id": None}
     entries = rows[:limit]
     more = len(rows) > limit

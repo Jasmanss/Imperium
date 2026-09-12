@@ -12,7 +12,7 @@
 import { createSSEParser, type SSEMessage } from "./sse";
 import type { CommandStreamEvent, CommandStreamEventType, HelloEvent, ServerEvent } from "./types";
 
-export type StreamStatus = "idle" | "connecting" | "live" | "reconnecting" | "offline" | "unauthorized";
+export type StreamStatus = "idle" | "connecting" | "live" | "reconnecting" | "offline" | "busy" | "unauthorized";
 
 export interface StreamState {
   status: StreamStatus;
@@ -24,6 +24,8 @@ export interface StreamState {
   failures: number;
   /** Local time (ms) of the next scheduled attempt. */
   retryAt: number | null;
+  /** Why the Mac refused the connection, in its own words, when it said so. */
+  rejection: string | null;
 }
 
 export interface StreamEventMeta {
@@ -100,7 +102,25 @@ const INITIAL_STATE: StreamState = {
   connectedAt: null,
   failures: 0,
   retryAt: null,
+  rejection: null,
 };
+
+/** Statuses the server explained itself, rather than the network failing. */
+const REJECTED_STATUS: Partial<Record<number, StreamStatus>> = { 429: "busy" };
+
+/** The `error` string from a JSON body, when the response carries one. */
+async function refusalReason(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      const error = (body as Record<string, unknown>).error;
+      if (typeof error === "string" && error.trim() !== "") return error.trim();
+    }
+  } catch {
+    // Not JSON, or the body went away; the generic status still applies.
+  }
+  return null;
+}
 
 export class EventStreamClient {
   private readonly getToken: () => string | null;
@@ -200,7 +220,7 @@ export class EventStreamClient {
 
   stop(): void {
     this.detach();
-    this.setState({ status: "idle", retryAt: null });
+    this.setState({ status: "idle", retryAt: null, rejection: null });
   }
 
   /** Drop the current attempt and connect again now. */
@@ -275,6 +295,16 @@ export class EventStreamClient {
       this.handleUnauthorized();
       return;
     }
+    // A refusal the Mac explained — today that is 429, every event-stream slot
+    // taken — is not the network being down, and its message says what to do
+    // about it. Retrying is still right: the condition clears on its own.
+    const rejected = REJECTED_STATUS[response.status];
+    if (rejected !== undefined) {
+      const reason = await refusalReason(response);
+      if (generation !== this.generation) return;
+      this.scheduleRetry(rejected, reason);
+      return;
+    }
     const contentType = response.headers.get("content-type") ?? "";
     if (!response.ok || !response.body || !contentType.includes("text/event-stream")) {
       discardBody(response);
@@ -330,6 +360,7 @@ export class EventStreamClient {
         connectedAt: Date.now(),
         failures: 0,
         retryAt: null,
+        rejection: null,
       });
       this.emit(event, { id: null, bootId: event.boot_id });
       return;
@@ -353,16 +384,18 @@ export class EventStreamClient {
     }
   }
 
-  private scheduleRetry(): void {
+  private scheduleRetry(rejected?: StreamStatus, rejection: string | null = null): void {
     if (!this.running) return;
     this.abandonConnection();
     const failures = this.state.failures + 1;
     const delay = backoffDelay(failures, this.serverRetryMs ?? this.baseDelayMs, this.maxDelayMs, this.random);
     const browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
     this.setState({
-      status: browserOffline || failures >= this.offlineAfterFailures ? "offline" : "reconnecting",
+      status:
+        rejected ?? (browserOffline || failures >= this.offlineAfterFailures ? "offline" : "reconnecting"),
       failures,
       retryAt: Date.now() + delay,
+      rejection: rejected === undefined ? null : rejection,
     });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
@@ -372,7 +405,7 @@ export class EventStreamClient {
 
   private handleUnauthorized(): void {
     this.detach();
-    this.setState({ status: "unauthorized", retryAt: null });
+    this.setState({ status: "unauthorized", retryAt: null, rejection: null });
     this.onUnauthorized?.();
   }
 

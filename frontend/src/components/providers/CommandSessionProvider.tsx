@@ -71,6 +71,9 @@ export type FeedAction =
   | { type: "metrics"; commandId: string; metrics: CommandMetrics }
   | { type: "dismissed"; key: string };
 
+/** Shown on a card the Mac no longer lists as waiting, when no event said why. */
+export const GONE_MESSAGE = "This confirmation is no longer waiting on the Mac. Nothing runs from this card.";
+
 function update(entries: FeedEntry[], key: string, change: (entry: FeedEntry) => FeedEntry): FeedEntry[] {
   return entries.map((entry) => (entry.key === key ? change(entry) : entry));
 }
@@ -160,8 +163,23 @@ export function feedReducer(entries: FeedEntry[], action: FeedAction): FeedEntry
             restored: true,
           };
         });
-      if (additions.length === 0) return entries;
-      return [...entries, ...additions].sort((a, b) => a.submittedAt - b.submittedAt);
+      // GET /pending is authoritative, and the confirmed/cancelled events that
+      // would normally close a card can be missed: a backend restart replays
+      // nothing (new boot), and a long disconnect outruns the 200-event buffer.
+      // So a card the listing does not mention is no longer live. Entries parked
+      // after the listing was taken are left alone — they raced an in-flight POST.
+      const listed = new Set(action.pending.map((item) => item.pending_id));
+      const settled = entries.map((entry) =>
+        entry.phase === "parked" &&
+        !entry.closed &&
+        entry.parked !== null &&
+        !listed.has(entry.parked.pending_id) &&
+        entry.parked.created_at < action.serverTime
+          ? { ...entry, closed: true, error: entry.error ?? GONE_MESSAGE }
+          : entry,
+      );
+      if (additions.length === 0) return settled.some((entry, i) => entry !== entries[i]) ? settled : entries;
+      return [...settled, ...additions].sort((a, b) => a.submittedAt - b.submittedAt);
     }
     case "resolvedElsewhere":
       return entries.map((entry) =>

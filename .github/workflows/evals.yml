@@ -4,20 +4,43 @@ on:
   push:
   pull_request:
 
+# Nothing after the checkout uses the token, and `npm ci` runs install scripts
+# from the whole dependency tree in the same workspace, so the job gets the
+# least it can be given.
+permissions:
+  contents: read
+
 jobs:
   offline:
-    name: Offline evals and frontend
+    name: Offline evals${{ matrix.frontend && ' and frontend' || '' }} (Python ${{ matrix.python-version }})
     # The offline suite needs no API key and never drives the GUI, but the
     # backend imports macOS-only automation libraries, so run on macOS.
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Mac this runs on has Python 3.9, so the backend and the harness
+          # have to keep working there; setup-python has no 3.9 build for the
+          # arm64 macos-latest image, hence the x86_64 one.
+          - python-version: "3.9"
+            runner: macos-13
+            frontend: false
+          - python-version: "3.11"
+            runner: macos-latest
+            frontend: true
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
+        with:
+          # No later step uses git. Leaving the credential in .git/config would
+          # hand it to every npm install script that runs in this workspace.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "${{ matrix.python-version }}"
           cache: pip
           cache-dependency-path: |
             backend/requirements.txt
@@ -30,6 +53,7 @@ jobs:
         run: python evals/runner.py --no-write
 
       - name: Set up Node
+        if: matrix.frontend
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -37,26 +61,32 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
+        if: matrix.frontend
         run: npm ci
         working-directory: frontend
 
       - name: Lint frontend
+        if: matrix.frontend
         run: npm run lint
         working-directory: frontend
 
       - name: Typecheck frontend
+        if: matrix.frontend
         run: npm run typecheck
         working-directory: frontend
 
       - name: Frontend unit tests
+        if: matrix.frontend
         run: npm test
         working-directory: frontend
 
       - name: Build frontend static export
+        if: matrix.frontend
         run: npm run build
         working-directory: frontend
 
       # Serves frontend/out through the backend in-process and checks every
-      # page's security headers and CSP script hashes.
+      # page's security headers, CSP script hashes, and the assets it loads.
       - name: Check the exported frontend as the backend serves it
+        if: matrix.frontend
         run: python evals/check_frontend_export.py

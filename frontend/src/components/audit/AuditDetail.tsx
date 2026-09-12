@@ -42,15 +42,25 @@ export function AuditDetail({ id, row, hrefFor, commandHref, onClose }: AuditDet
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
+    // The sheet is unmounted to close it, so React tears it out of the document
+    // before this cleanup runs and <dialog>'s own focus restore never happens.
+    // Remember the row that opened it and send focus back there by hand.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!dialog.open) {
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
     }
     closeRef.current?.focus();
     return () => {
-      if (!dialog.open) return;
-      if (typeof dialog.close === "function") dialog.close();
-      else dialog.removeAttribute("open");
+      if (dialog.open) {
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      }
+      // The list re-renders as the sheet closes; focus the row only if it is
+      // still there, and leave focus alone if something else already took it.
+      if (!opener || !document.contains(opener)) return;
+      if (document.activeElement !== null && document.activeElement !== document.body) return;
+      opener.focus();
     };
   }, []);
 

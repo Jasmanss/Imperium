@@ -80,6 +80,13 @@ _JAVASCRIPT_TYPES = frozenset(
 # Newlines are already normalized to \n before tokenizing.
 _WHITESPACE = "\t\n\f "
 
+# What the filesystem raises for a path it cannot express: a NUL byte (os.stat
+# raises ValueError, which Starlette's StaticFiles does not catch), a symlink
+# loop, a name too long. Such a path names no file in the export, so it is a 404
+# — and, unlike an exception escaping the ASGI app, one that still carries the
+# security headers and the CSP.
+_UNSERVABLE = (ValueError, OSError)
+
 # Elements whose content the tokenizer reads as text until their end tag
 # (RAWTEXT and RCDATA, with scripting enabled).
 _TEXT_ELEMENTS = frozenset(
@@ -313,11 +320,13 @@ def executes(attributes: dict) -> bool:
     if "src" in attributes:
         return False
     if "type" in attributes:
-        if attributes["type"] == "":
-            return True
+        # The spec strips the type before comparing it, so a whitespace-only type
+        # is the empty string, which runs.
         type_string = attributes["type"].strip(_WHITESPACE).lower()
+        if type_string == "":
+            return True
     elif attributes.get("language"):
-        type_string = "text/" + attributes["language"].lower()
+        type_string = "text/" + attributes["language"].strip(_WHITESPACE).lower()
     else:
         return True
     if type_string in ("module", "importmap", "speculationrules") or type_string in _JAVASCRIPT_TYPES:
@@ -370,6 +379,13 @@ class FrontendHost:
         return self._files
 
     async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "websocket":
+            # Starlette routes websocket scopes to a mount too, and the auth
+            # middleware only sees http ones. Nothing here speaks WebSocket, so
+            # refuse the handshake: returning without a message leaves the server
+            # with a half-open connection it logs as an application error.
+            await send({"type": "websocket.close", "code": 1000})
+            return
         if scope["type"] != "http":
             return
         files = self._export_files()
@@ -384,6 +400,8 @@ class FrontendHost:
                 response = await files.get_response(path, scope)
             except HTTPException as exc:
                 response = PlainTextResponse(str(exc.detail), status_code=exc.status_code)
+            except _UNSERVABLE:
+                response = PlainTextResponse("Not Found", status_code=404)
             self._secure_export(response, path)
         await response(scope, receive, send)
 

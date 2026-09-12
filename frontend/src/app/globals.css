@@ -104,8 +104,10 @@
   padding-bottom: calc(var(--bottom-chrome) + var(--commandbar-height) + 2rem);
 }
 
+/* --keyboard-inset is set by useKeyboardInset, and is 0 wherever the browser
+   already shrank the layout viewport for the software keyboard. */
 @utility bottom-chrome {
-  bottom: var(--bottom-chrome);
+  bottom: calc(var(--bottom-chrome) + var(--keyboard-inset, 0px));
 }
 
 @utility h-tabbar {

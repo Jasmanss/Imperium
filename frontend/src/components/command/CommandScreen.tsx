@@ -16,7 +16,7 @@ export const EXAMPLE_COMMANDS: readonly string[] = [
   "play lofi beats on Spotify",
   "open Notes",
   "git status in imperium",
-  "text 555-0100 saying on my way",
+  "text 555-555-0100 saying on my way",
 ];
 
 export function CommandScreen() {

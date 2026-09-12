@@ -28,7 +28,11 @@ interface ConfirmCardProps {
  */
 export function ConfirmCard({ entry, parked, onConfirm, onCancel, onRetry, onDismiss, retryDisabled }: ConfirmCardProps) {
   const receivedAt = entry.parkedAt ?? 0;
-  const now = useNow(receivedAt, 1000, !entry.closed);
+  // The local time the countdown reaches zero. Nothing on the card changes after
+  // that, and an expired card stays on screen until it is dismissed, so the
+  // clock stops there instead of re-rendering once a second for the session.
+  const zeroAt = receivedAt + Math.max(0, parked.expires_at - parked.server_time) * 1000;
+  const now = useNow(receivedAt, 1000, !entry.closed, zeroAt);
   const remaining = secondsRemaining(parked.expires_at, parked.server_time, receivedAt, Math.max(now, receivedAt));
   const expired = isExpired(remaining);
   const confirming = entry.phase === "confirming";
